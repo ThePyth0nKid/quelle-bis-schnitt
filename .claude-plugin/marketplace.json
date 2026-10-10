@@ -1,12 +1,12 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "quelle-bis-schnitt",
-  "description": "Plugins für den Arbeitsweg Recherche, Belege, Skript, Dreh, Schnitt und Abgabe. Agenten recherchieren, Regeln beraten, der Mensch entscheidet. Das Plugin akte (Ermittler-Board als MCP) folgt aus dem Repo die-akte.",
+  "description": "Plugins für den Arbeitsweg Recherche, Belege, Skript, Dreh, Schnitt und Abgabe. Agenten recherchieren, Regeln beraten, der Mensch entscheidet.",
   "owner": {
     "name": "ThePyth0nKid"
   },
   "metadata": {
-    "description": "Claude-Code-Plugins von der Quelle bis zum Schnitt. Plugin akte folgt.",
+    "description": "Claude-Code-Plugins von der Quelle bis zum Schnitt.",
     "version": "0.1.0"
   },
   "plugins": [
@@ -60,6 +60,24 @@
         "tavily",
         "suche",
         "mcp"
+      ]
+    },
+    {
+      "name": "akte",
+      "description": "Die Akte als MCP: Ermittler-Board mit Belegpflicht, Beweissicherung und signierten Freigaben. Agenten legen Karten, Fäden mit wörtlichen Belegen und Kamerafahrten als Entwurf an; freigeben tut ein Mensch. Braucht eine eigene Akte (lokal, Repo die-akte) und uv.",
+      "source": "./plugins/akte",
+      "version": "0.1.0",
+      "author": {
+        "name": "ThePyth0nKid"
+      },
+      "license": "MIT",
+      "keywords": [
+        "akte",
+        "ermittler-board",
+        "belege",
+        "beweissicherung",
+        "mcp",
+        "journalismus"
       ]
     },
     {

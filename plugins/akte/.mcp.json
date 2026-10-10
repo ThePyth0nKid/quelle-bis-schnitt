@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "akte": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/ThePyth0nKid/die-akte@v0.1.0#subdirectory=mcp",
+        "akte-mcp"
+      ],
+      "env": {
+        "AKTE_BASIS": "${user_config.basis}",
+        "AKTE_TOKEN": "${user_config.token}"
+      }
+    }
+  }
+}

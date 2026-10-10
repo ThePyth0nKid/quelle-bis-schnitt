@@ -1,0 +1,34 @@
+{
+  "name": "akte",
+  "version": "0.1.0",
+  "description": "Die Akte als MCP: Ermittler-Board mit Belegpflicht, Beweissicherung und signierten Freigaben. Agenten legen Karten, Fäden mit wörtlichen Belegen und Kamerafahrten als Entwurf an; freigeben tut ein Mensch. Braucht eine eigene Akte (lokal, Repo die-akte) und uv.",
+  "author": {
+    "name": "ThePyth0nKid"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/ThePyth0nKid/die-akte",
+  "repository": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "keywords": [
+    "akte",
+    "ermittler-board",
+    "belege",
+    "beweissicherung",
+    "mcp",
+    "journalismus"
+  ],
+  "userConfig": {
+    "basis": {
+      "type": "string",
+      "title": "Adresse deiner Akte",
+      "description": "Wo deine Akte läuft, z. B. http://localhost:8080 (Docker-Standard).",
+      "required": true
+    },
+    "token": {
+      "type": "string",
+      "title": "Werkzeug-Token (optional)",
+      "description": "Ohne Token nur lesen. Mit Token (manage.py akte_token <konto>) legt Claude Entwürfe an; freigeben kann es nie. Wird als geheimer Wert gespeichert.",
+      "sensitive": true,
+      "required": false
+    }
+  }
+}
