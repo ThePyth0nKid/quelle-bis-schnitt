@@ -103,8 +103,8 @@ anders (Messung und Spanne im Beispiel-Setup: `docs/messungen/studio-zwei-kamera
   gleichzeitig). Ergebnis: je Take ein Ordner mit genau zwei deckungsgleichen Dateien und ein Bericht.
 - `studio waechter` macht das nach jedem Stopp automatisch und prüft beim Aufnahmestart, ob beide Kameras Bild liefern
   und das Mikrofon Pegel hat.
-- **Rohdateien bleiben standardmäßig liegen.** Ob sie nach einem grünen Bau in den Papierkorb dürfen, steht in
-  `studio.toml` und ist deine Entscheidung.
+- **Rohdateien bleiben standardmäßig liegen.** Ob sie nach einem grünen Bau nach `<ziel>/_Papierkorb/<Take>/` wandern
+  (verschoben, nie gelöscht), steht in `studio.toml` und ist deine Entscheidung.
 - **Keine Hardlinks auf exFAT** und nie zwischen zwei Laufwerken; verschoben wird nur durch Umbenennen auf derselben
   Platte, damit keine halb kopierte Datei entsteht.
 - Prüfen am Kontaktbogen: zwei, drei Stellen mit deutlicher Bewegung (Klatschen, Hände), beide Kameras nebeneinander.

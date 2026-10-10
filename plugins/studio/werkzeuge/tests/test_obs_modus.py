@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from studio_werkzeuge import obs_modus as om
@@ -94,3 +95,34 @@ def test_modi_aus_konfiguration(tmp_path, hilfe):
     assert om.modi(k) == {"lang": {"bitrate": 20000}} and om.filterliste(k) == [("a", "fa"), ("b", "fb")]
     with pytest.raises(KonfigFehler):
         om.modi(hilfe.konfig_aus(tmp_path, ""))
+
+
+def test_sicherung_warnt_bei_zugangsdaten_und_ist_privat(tmp_path):
+    obs = FakeObs()
+    obs.filter["Kamera vorn"][1]["einst"].update(server="rtmp://example.org/live", key="abc")
+    zeilen = om.umschalten(obs, FILTER, "lang", MODI, tmp_path / "sicherung")
+    assert any("Zugangsdaten (key, server)" in z for z in zeilen)
+    datei = next((tmp_path / "sicherung").glob("obs-filter-*.json"))
+    assert json.loads(datei.read_text(encoding="utf-8"))[0]["einstellungen"]["key"] == "abc"   # zurückspielbar
+    if os.name != "nt":
+        assert datei.stat().st_mode & 0o777 == 0o600
+
+
+def test_gescheitertes_neuanlegen_spielt_den_alten_filter_zurueck(tmp_path):
+    obs = FakeObs()
+    echt = obs.send
+    zaehler = {"create": 0}
+
+    def send(art, d=None, raw=False):
+        if art == "CreateSourceFilter":
+            zaehler["create"] += 1
+            if zaehler["create"] == 1:
+                obs.anfragen.append(art)
+                raise RuntimeError("OBS hat abgelehnt")
+        return echt(art, d, raw)
+
+    obs.send = send
+    with pytest.raises(StudioFehler, match="alte Filter ist wieder angelegt"):
+        om.umschalten(obs, FILTER, "lang", MODI, tmp_path / "sicherung")
+    f = obs.filter["Kamera vorn"][1]
+    assert f["name"] == "Aufnahme A" and f["einst"]["rate_control"] == "CQP" and f["aktiv"] is True

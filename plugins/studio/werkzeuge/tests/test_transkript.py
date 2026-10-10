@@ -71,3 +71,26 @@ def test_ausgabeformate():
     assert "01:01:01,000" in tr.als_text(s, ".srt")
     assert json.loads(tr.als_text(s, ".json"))["segmente"][1]["text"] == "Zwei"
     assert tr.als_text(s, ".txt").splitlines()[0].endswith("] Eins")
+
+
+@pytest.mark.parametrize("wert", [0, -5, float("inf"), float("nan"), True, "60"])
+def test_zeitlimit_wird_geprueft(wert):
+    with pytest.raises(KonfigFehler):
+        tr.zeitlimit_pruefen(wert)
+
+
+def test_fern_segmente_robust():
+    assert tr._segment({"start": "1", "end": 2, "text": " a "}) == {"start": 1.0, "end": 2.0, "text": "a",
+                                                                    "woerter": []}
+    for falsch in ("x", {"end": 2}, {"start": "a", "end": 1}):
+        with pytest.raises(StudioFehler):
+            tr._segment(falsch)
+
+
+def test_ausgabe_wird_nie_ueberschrieben(tmp_path, capsys):
+    from studio_werkzeuge.cli import main
+    datei, ausgabe = tmp_path / "x.wav", tmp_path / "t.srt"
+    datei.write_bytes(b"x")
+    ausgabe.write_text("alt", encoding="utf-8")
+    assert main(["transkript", str(datei), "--ausgabe", str(ausgabe)]) == 2
+    assert ausgabe.read_text(encoding="utf-8") == "alt" and "Nie überschreiben" in capsys.readouterr().err

@@ -95,11 +95,10 @@ def test_abbruch_wenn_begrenzer_zu_viel_greifen_muesste(tmp_path, hilfe):
     b = mastern(eingang, tmp_path / "master.wav")
     assert not b["ok"] and "Begrenzer müsste" in b["abbruch"] and b["begrenzer_db"] > 3.0
     assert not (tmp_path / "master.wav").exists()
-    # Einstellbar: der Mensch darf mehr Begrenzung erlauben. Dann entscheidet die Nachmessung; ein True Peak über dem
-    # Ziel (Überschwinger nach starkem Begrenzen) legt weiterhin nichts an den Zielnamen.
+    # Einstellbar: der Mensch darf mehr Begrenzung erlauben. Dann entscheidet die Nachmessung.
     b2 = mastern(eingang, tmp_path / "master2.wav", max_begrenzer=40.0)
     assert "Begrenzer müsste" not in (b2.get("abbruch") or "") and "nachher" in b2
-    assert b2["ok"] == (tmp_path / "master2.wav").exists()
+    assert b2["begrenzer_db"] >= b["begrenzer_db"] > 3.0              # mit der endgültigen Verstärkung berechnet
 
 
 @braucht_ffmpeg
@@ -124,3 +123,28 @@ def test_stummer_eingang_und_fehlende_datei(tmp_path, hilfe):
         still = hilfe.wav_schreiben(tmp_path / "still.wav", np.zeros(48_000 * 3, np.float32))
         with pytest.raises(StudioFehler, match="stumm"):
             mastern(still, tmp_path / "x.wav")
+
+
+def test_bedarf_wird_mit_der_endgueltigen_verstaerkung_geprueft(tmp_path, monkeypatch):
+    """Vorher 2,9 dB Bedarf (erlaubt), nach der Nachführung (+0,5 dB) 3,4 dB: Abbruch, nichts geschrieben."""
+    eingang = tmp_path / "roh.wav"
+    eingang.write_bytes(b"x")
+    monkeypatch.setattr(medien, "medien_info", lambda p: {"dauer_s": 10.0, "hat_ton": True, "hat_bild": False})
+    messungen = iter([{"lufs": -20.0, "lra": 3.0, "dbtp": -7.6},     # vorher: Anhebung 6 dB → 6 − 7,6 + 1,5 = −0,1 …
+                      {"lufs": -14.5, "lra": 3.0, "dbtp": -1.5},     # Kette: 0,5 LU zu leise
+                      {"lufs": -14.0, "lra": 3.0, "dbtp": -1.5}])
+    monkeypatch.setattr(medien, "lautheit_messen", lambda p, vorfilter="": next(messungen))
+    b = mastern(eingang, tmp_path / "m.wav", max_begrenzer=0.3)
+    assert b["anhebung_db"] == 6.5 and b["begrenzer_db"] == 0.4 and "nachgeführten" in b["abbruch"]
+    assert not (tmp_path / "m.wav").exists()
+
+
+def test_part_datei_vorhanden_bricht_ab(tmp_path, hilfe, monkeypatch):
+    eingang = tmp_path / "roh.wav"
+    eingang.write_bytes(b"x")
+    (tmp_path / "m.part.wav").write_bytes(b"rest")
+    monkeypatch.setattr(medien, "medien_info", lambda p: {"dauer_s": 10.0, "hat_ton": True, "hat_bild": False})
+    monkeypatch.setattr(medien, "lautheit_messen", lambda p, vorfilter="": {"lufs": -14.0, "lra": 3.0, "dbtp": -9.0})
+    with pytest.raises(StudioFehler, match="abgebrochener Lauf"):
+        mastern(eingang, tmp_path / "m.wav")
+    assert (tmp_path / "m.part.wav").read_bytes() == b"rest"

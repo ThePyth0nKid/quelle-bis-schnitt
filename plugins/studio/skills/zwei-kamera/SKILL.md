@@ -42,7 +42,8 @@ Einstellungen in `studio.toml` unter `[kameras]` (Dateipräfixe, Namen der OBS-Q
 (Encoder, Qualität, Drehung von Kamera B, Umgang mit Rohdateien, Gegenprobe).
 
 **Rohdateien bleiben standardmäßig liegen** (`[paar] rohdateien = "behalten"`, sie wandern in `<Take>/Roh/`). Ob sie
-nach einem grünen Bau in den Papierkorb dürfen, entscheidet der Mensch in der Konfiguration, nicht das Werkzeug.
+nach einem grünen, nachgeprüften Bau nach `<ziel>/_Papierkorb/<Take>/` wandern dürfen (`rohdateien = "papierkorb"`;
+verschoben, nie gelöscht), entscheidet der Mensch in der Konfiguration, nicht das Werkzeug.
 
 Rote Paare landen in einem Ordner mit Kennzeichnung (z. B. „… PRUEFEN“), nie unter dem normalen Namen. Gründe stehen im
 Bericht (`warnungen`).

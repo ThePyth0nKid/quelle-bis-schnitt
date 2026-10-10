@@ -2,20 +2,21 @@
 """Zwei-Kamera-Paar aus OBS Source Record bildgenau deckungsgleich machen (`studio paar`).
 
 Je Take entsteht ein Ordner, benannt wie die OBS-Aufnahme („2026-03-14 10-15-00“), bei einem roten Befund
-„… PRUEFEN“, darin genau zwei Videos: ``<name> Cam A.mp4`` und ``<name> Cam B.mp4`` (gleiche Bildzahl, gleicher Start,
+„… PRUEFEN“, darin zwei Videos: ``<name> Cam A.mp4`` und ``<name> Cam B.mp4`` (gleiche Bildzahl, gleicher Start,
 bytegleiche Tonspur). Kamera A bleibt im Bild unverändert (Stream-Copy) und gibt Zeitachse und Länge vor; Kamera B wird
 neu kodiert und dabei auf A gelegt. Gebaut wird in einem Arbeitsordner; erst nach der Prüfung kommen die Dateien an den
-Zielort. Der Bericht liegt in ``<ziel>/synchron/<name>.json``.
+Zielort. Liegt dort schon eine ältere Fassung, wandert sie vorher nach ``<Take>/Alt-<zeit>/``; scheitert das Ablegen,
+wird zurückgerollt und der Arbeitsordner bleibt als „~Fehler …“ zum Prüfen liegen. Der Bericht liegt in
+``<ziel>/synchron/<name>.json``. Ein Bau je Ziel zur selben Zeit (Sperre ``<ziel>/synchron/bau.lock``).
 
-Rohdateien: Voreinstellung ``behalten`` (sie wandern nach ``<Take>/Roh/``). ``papierkorb`` legt sie nach einem grünen
-Bau in den Windows-Papierkorb (nie endgültig löschen); ``--roh-lassen`` fasst sie gar nicht an.
+Rohdateien: Voreinstellung ``behalten`` (sie wandern nach ``<Take>/Roh/``). ``papierkorb`` verschiebt sie nach einem
+grünen und nachgeprüften Bau nach ``<ziel>/_Papierkorb/<Take>/`` (nie endgültig löschen; leeren entscheidet der
+Mensch); ``--roh-lassen`` fasst sie gar nicht an.
 
 Exit: 0 grün · 1 gebaut, aber rot (Ordner „… PRUEFEN“, Gründe im Bericht) · 2 Eingabe- oder Konfigurationsfehler.
 """
 from __future__ import annotations
 
-import base64
-import errno
 import json
 import os
 import re
@@ -27,6 +28,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +37,7 @@ from studio_werkzeuge import medien
 from studio_werkzeuge.fehler import KeinTon, KonfigFehler, StudioFehler, ZuKurzeUeberlappung
 from studio_werkzeuge.klicks import klicks_zaehlen
 from studio_werkzeuge.konfig import Konfig
+from studio_werkzeuge.sicher import Sperre, umbenennen, verschieben
 from studio_werkzeuge.synchron import (
     STANDBILD_ANTEIL,
     Bewegung,
@@ -59,7 +62,12 @@ KANTEN_FENSTER_S = 60.0           # Anfang und Ende langer Takes je so lang verg
 KANTEN_MIN_DAUER_S = 150.0
 PHASE_SPRUNG_MAX = 0.7            # Bilder: so weit darf der Bild-Versatz zwischen Anfang und Ende wandern
 GEGENPROBE_TOLERANZ = 0.6         # Bilder nach dem Bauen (Rundung auf ganze Bilder lässt bis 0,5 übrig)
+ABLEGEN_VERSUCHE = 5              # ein Player oder Schnittprogramm hält eine Datei kurz offen
+ABLEGEN_PAUSE_S = 1.0
 PRUEFEN_ZUSATZ = " PRUEFEN"
+ARBEIT_PRAEFIX = "~in Arbeit "
+FEHLER_PRAEFIX = "~Fehler "
+PAPIERKORB = "_Papierkorb"
 DREHUNG_B = {"keine": None, "rechts": "transpose=1", "links": "transpose=2"}
 W, H = 128, 72                    # Bewegungsmessung auf kleinen Graubildern
 STEMPEL_FORMAT = "%Y%m%d-%H%M%S"
@@ -76,6 +84,9 @@ class Benennung:
     def __post_init__(self) -> None:
         if self.praefix_a.lower() == self.praefix_b.lower():
             raise KonfigFehler("praefix_a und praefix_b müssen sich unterscheiden (auch ohne Groß-/Kleinschreibung).")
+        for teil in (self.praefix_a, self.praefix_b, self.endung):
+            if any(z in teil for z in "/\\*?:"):
+                raise KonfigFehler(f"[kameras] {teil!r}: keine Pfad- oder Platzhalterzeichen erlaubt.")
 
     @property
     def muster(self) -> re.Pattern[str]:
@@ -104,23 +115,28 @@ class Einstellungen:
 
 
 def benennung_aus(konfig: Konfig) -> Benennung:
-    return Benennung(str(konfig.wert("kameras", "praefix_a", "cam-A-")),
-                     str(konfig.wert("kameras", "praefix_b", "cam-B-")),
-                     str(konfig.wert("kameras", "endung", ".mp4")))
+    return Benennung(konfig.text("kameras", "praefix_a", "cam-A-"), konfig.text("kameras", "praefix_b", "cam-B-"),
+                     konfig.text("kameras", "endung", ".mp4"))
 
 
 def einstellungen_aus(konfig: Konfig) -> Einstellungen:
-    e = Einstellungen(str(konfig.wert("paar", "encoder", "libx264")), int(konfig.wert("paar", "cq", 18)),
-                      str(konfig.wert("paar", "drehung_b", "keine")),
-                      str(konfig.wert("paar", "rohdateien", "behalten")),
-                      bool(konfig.wert("paar", "gegenprobe", True)))
+    e = Einstellungen(konfig.text("paar", "encoder", "libx264"), konfig.ganzzahl("paar", "cq", 18),
+                      konfig.text("paar", "drehung_b", "keine"), konfig.text("paar", "rohdateien", "behalten"),
+                      konfig.wahrheit("paar", "gegenprobe", True))
     if e.drehung_b not in DREHUNG_B:
         raise KonfigFehler(f"[paar] drehung_b muss {', '.join(DREHUNG_B)} sein, ist {e.drehung_b!r}.")
     if e.rohdateien not in ("behalten", "papierkorb"):
         raise KonfigFehler(f"[paar] rohdateien muss behalten oder papierkorb sein, ist {e.rohdateien!r}.")
     if e.encoder not in ("libx264", "h264_nvenc"):
         raise KonfigFehler(f"[paar] encoder muss libx264 oder h264_nvenc sein, ist {e.encoder!r}.")
+    if not 0 <= e.cq <= 51:
+        raise KonfigFehler(f"[paar] cq muss zwischen 0 und 51 liegen, ist {e.cq}.")
     return e
+
+
+def bau_sperre(ziel: Path) -> Sperre:
+    """Ein Bau je Ziel zur selben Zeit (auch Wächter, `--einmal` und Handaufruf untereinander)."""
+    return Sperre(ziel / "synchron" / "bau.lock", "Ein anderer Bau")
 
 
 # ── reine Hilfen ─────────────────────────────────────────────────────────────────────────────────
@@ -137,8 +153,14 @@ def ordner_name(stempel: str) -> str:
         return stempel
 
 
+def fps_ausdruck(fps: float | Fraction | str) -> str:
+    """Bildrate exakt für ffmpeg-Ausdrücke: 25 → „25“, 29,97 → „(30000/1001)“."""
+    bruch = fps if isinstance(fps, Fraction) else Fraction(fps).limit_denominator(100_000)
+    return str(bruch.numerator) if bruch.denominator == 1 else f"({bruch.numerator}/{bruch.denominator})"
+
+
 def encoder_args(encoder: str, cq: int, fps: float) -> list[str]:
-    gop = str(max(1, int(round(fps * 2))))
+    gop = str(max(1, int(round(float(fps) * 2))))
     if encoder == "h264_nvenc":
         return ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", str(cq), "-b:v", "0",
                 "-maxrate", "80M", "-bufsize", "160M", "-profile:v", "high", "-g", gop, "-bf", "0"]
@@ -147,11 +169,11 @@ def encoder_args(encoder: str, cq: int, fps: float) -> list[str]:
     raise StudioFehler(f"Unbekannter Encoder {encoder!r} (h264_nvenc oder libx264).")
 
 
-def befehl_ton(quelle: Path, bilder: int, fps: float, wav: Path, versatz_s: float = 0.0,
+def befehl_ton(quelle: Path, bilder: int, fps: float | Fraction, wav: Path, versatz_s: float = 0.0,
                quelle_s: float | None = None) -> list[str]:
     """Mikrofonspur, exakt ``bilder`` Bilder lang (hinten mit Stille aufgefüllt). ``versatz_s`` > 0 schneidet vorne so
     viel weg, < 0 setzt Stille davor; Übergänge zur Stille werden 5 ms ein-/ausgeblendet (kein Klick an der Naht)."""
-    n = int(round(bilder / fps * TON_RATE))
+    n = int(round(bilder / float(fps) * TON_RATE))
     n0 = int(round(versatz_s * TON_RATE))
     if n0 > 0:
         schub = f"atrim=start_sample={n0},asetpts=PTS-STARTPTS,"
@@ -162,23 +184,23 @@ def befehl_ton(quelle: Path, bilder: int, fps: float, wav: Path, versatz_s: floa
     ende = None if quelle_s is None else quelle_s - n0 / TON_RATE
     if ende is not None and 0.01 < ende < n / TON_RATE - 0.001:
         schub += f"afade=t=out:st={ende - 0.005:.6f}:d=0.005,"
-    return ["ffmpeg", "-v", "error", "-y", "-i", str(quelle), "-vn", "-map", "0:a:0",
+    return [*medien.FFMPEG, "-v", "error", "-y", "-i", medien.arg(quelle), "-vn", "-map", "0:a:0",
             "-af", f"aresample={TON_RATE},{schub}apad=whole_len={n},atrim=end_sample={n}", "-ac", "2",
-            "-c:a", "pcm_s24le", str(wav)]
+            "-c:a", "pcm_s24le", medien.arg(wav)]
 
 
 def befehl_aac(wav: Path, m4a: Path) -> list[str]:
-    return ["ffmpeg", "-v", "error", "-y", "-i", str(wav), "-c:a", "aac", "-aac_coder", "fast", "-b:a", "320k",
-            str(m4a)]
+    return [*medien.FFMPEG, "-v", "error", "-y", "-i", medien.arg(wav), "-c:a", "aac", "-aac_coder", "fast",
+            "-b:a", "320k", medien.arg(m4a)]
 
 
 def befehl_kopie(quelle: Path, ton: Path, ziel: Path) -> list[str]:
     """Bild unverändert übernehmen, Ton ersetzen."""
-    return ["ffmpeg", "-v", "error", "-y", "-i", str(quelle), "-i", str(ton), "-map", "0:v:0", "-map", "1:a:0",
-            "-c", "copy", "-movflags", "+faststart", str(ziel)]
+    return [*medien.FFMPEG, "-v", "error", "-y", "-i", medien.arg(quelle), "-i", medien.arg(ton), "-map", "0:v:0",
+            "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", medien.arg(ziel)]
 
 
-def befehl_neu(quelle: Path, ton: Path, plan: Plan, fps: float, ziel: Path, encoder: str, cq: int,
+def befehl_neu(quelle: Path, ton: Path, plan: Plan, fps: float | Fraction, ziel: Path, encoder: str, cq: int,
                drehen: str | None = None) -> list[str]:
     """Kamera B auf A legen: vorne Standbilder davor oder Bilder weg, genau ``plan.bilder`` Bilder, optional drehen."""
     if plan.vorne >= 0:
@@ -190,12 +212,14 @@ def befehl_neu(quelle: Path, ton: Path, plan: Plan, fps: float, ziel: Path, enco
         vf += f",{drehen}"
     if plan.auffuellen:
         vf += f",tpad=stop_mode=clone:stop={plan.auffuellen}"
-    # Zeitstempel zuletzt neu aus dem Bildindex: tpad am Anfang hinterlässt sonst doppelte oder zu kurze Stempel.
-    vf += f",setpts=N/{fps:g}/TB"
-    return ["ffmpeg", "-v", "error", "-y", "-i", str(quelle), "-i", str(ton), "-map", "0:v:0", "-map", "1:a:0",
-            "-vf", vf, "-fps_mode", "passthrough", "-frames:v", str(plan.bilder), *encoder_args(encoder, cq, fps),
-            "-pix_fmt", "yuv420p", "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709",
-            "-color_trc", "bt709", "-c:a", "copy", "-movflags", "+faststart", str(ziel)]
+    # Zeitstempel zuletzt neu aus dem Bildindex (exakte Bildrate, auch 30000/1001): tpad am Anfang hinterlässt sonst
+    # doppelte oder zu kurze Stempel.
+    vf += f",setpts=N/{fps_ausdruck(fps)}/TB"
+    return [*medien.FFMPEG, "-v", "error", "-y", "-i", medien.arg(quelle), "-i", medien.arg(ton), "-map", "0:v:0",
+            "-map", "1:a:0", "-vf", vf, "-fps_mode", "passthrough", "-frames:v", str(plan.bilder),
+            *encoder_args(encoder, cq, float(fps)), "-pix_fmt", "yuv420p", "-color_range", "tv", "-colorspace",
+            "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-c:a", "copy", "-movflags", "+faststart",
+            medien.arg(ziel)]
 
 
 # ── Dateien finden und ablegen ───────────────────────────────────────────────────────────────────
@@ -204,7 +228,7 @@ def such_orte(inbox: Path, ziel: Path | None = None) -> list[Path]:
     """Wo Rohdateien liegen können: lose in der Inbox, direkt in ``<inbox>/<Take>/``, in ``<ziel>/<Take>/Roh/``."""
     orte = [inbox]
     if inbox.is_dir():
-        orte += sorted(p for p in inbox.iterdir() if p.is_dir())
+        orte += sorted(p for p in inbox.iterdir() if p.is_dir() and p.name != PAPIERKORB)
     if ziel is not None and ziel.is_dir():
         orte += sorted(p / "Roh" for p in ziel.iterdir() if (p / "Roh").is_dir())
     return orte
@@ -254,10 +278,9 @@ def take_ordner_vorbereiten(ziel: Path, name: str, rot: bool) -> tuple[Path, str
     hinweis, umzug = None, None
     if anderer.exists():
         if not ordner.exists():
-            gebaut = (anderer / f"{name} Cam A.mp4").is_file()
+            urteil = "mit neuem Urteil " if (anderer / f"{name} Cam A.mp4").is_file() else ""
             anderer.rename(ordner)
             umzug = (anderer, ordner)
-            urteil = "mit neuem Urteil " if gebaut else ""
             hinweis = f"Take-Ordner {urteil}umbenannt: „{anderer.name}“ → „{ordner.name}“"
         else:
             alt = ziel / f"{anderer.name} ALT {datetime.now().strftime('%H-%M-%S')}"
@@ -277,15 +300,54 @@ def pfad_nach_umzug(p: Path, umzug: tuple[Path, Path] | None) -> Path:
         return p
 
 
-def verschieben(quelle: Path, ziel: Path) -> None:
-    """Auf derselben Platte nur umbenennen (eine noch offene Datei wird nicht halb kopiert); nur auf eine andere
-    Platte wird kopiert. Hardlinks werden nie angelegt (exFAT kennt keine)."""
+def ablegen(dateien: dict[str, Path], ordner: Path, versuche: int = ABLEGEN_VERSUCHE,
+            pause_s: float = ABLEGEN_PAUSE_S) -> list[str]:
+    """Die fertigen Dateien in ``ordner`` legen, ohne etwas ohne Sicherung zu überschreiben. Liegt schon eine
+    Fassung dort, wandert sie vorher nach ``ordner/Alt-<zeit>/``. Scheitert ein Schritt (auch nach Wiederholungen),
+    wird alles zurückgerollt: die neuen Dateien zurück an ihren Ort, die alten an ihren Platz. Gibt Hinweise zurück."""
+    alt_ordner = ordner / f"Alt-{datetime.now():%Y%m%d-%H%M%S}"
+    beiseite: list[tuple[Path, Path]] = []      # (ursprünglich, gesichert)
+    abgelegt: list[tuple[Path, Path]] = []      # (Arbeitsdatei, Ziel)
+    hinweise: list[str] = []
+
+    def mit_wiederholung(schritt: Callable[[], None], was: str) -> None:
+        for versuch in range(versuche):
+            try:
+                schritt()
+                return
+            except OSError as e:
+                if versuch == versuche - 1:
+                    raise StudioFehler(f"{was}: {e}. Ist die Datei gerade in einem Programm geöffnet?") from e
+                time.sleep(pause_s)
+
     try:
-        quelle.replace(ziel)
-    except OSError as e:
-        if getattr(e, "winerror", None) != 17 and e.errno != errno.EXDEV:   # 17 = ERROR_NOT_SAME_DEVICE
-            raise
-        shutil.move(str(quelle), str(ziel))
+        for quelle in dateien.values():
+            ziel = ordner / quelle.name
+            if ziel.exists():
+                alt_ordner.mkdir(exist_ok=True)
+                mit_wiederholung(lambda z=ziel: umbenennen(z, alt_ordner / z.name), f"„{ziel.name}“ beiseitelegen")
+                beiseite.append((ziel, alt_ordner / ziel.name))
+        for quelle in dateien.values():
+            ziel = ordner / quelle.name
+            mit_wiederholung(lambda q=quelle, z=ziel: umbenennen(q, z), f"„{quelle.name}“ ablegen")
+            abgelegt.append((quelle, ziel))
+    except StudioFehler:
+        for quelle, ziel in reversed(abgelegt):
+            try:
+                umbenennen(ziel, quelle)
+            except OSError:
+                pass
+        for ursprung, gesichert in reversed(beiseite):
+            try:
+                umbenennen(gesichert, ursprung)
+            except OSError:
+                pass
+        if alt_ordner.is_dir() and not any(alt_ordner.iterdir()):
+            alt_ordner.rmdir()
+        raise
+    if beiseite:
+        hinweise.append(f"Ältere Fassung gesichert in „{alt_ordner.name}“ (löschen entscheidet der Mensch).")
+    return hinweise
 
 
 def roh_mitnehmen(ordner: Path, dateien: tuple[Path, ...]) -> tuple[Path, list[str]]:
@@ -304,35 +366,19 @@ def roh_mitnehmen(ordner: Path, dateien: tuple[Path, ...]) -> tuple[Path, list[s
     return roh, hinweise
 
 
-def papierkorb(pfad: Path) -> None:
-    """Datei in den Windows-Papierkorb legen; kein endgültiges Löschen. Außerhalb von Windows nicht verfügbar."""
-    if os.name != "nt":
-        raise OSError("Papierkorb gibt es hier nur unter Windows; Datei bleibt liegen.")
-    if not pfad.is_file():
-        raise FileNotFoundError(str(pfad))
-    skript = ("Add-Type -AssemblyName Microsoft.VisualBasic; "
-              f"[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('{str(pfad).replace(chr(39), chr(39) * 2)}', "
-              "'OnlyErrorDialogs', 'SendToRecycleBin')")
-    kodiert = base64.b64encode(skript.encode("utf-16-le")).decode("ascii")
-    lauf = subprocess.run([powershell(), "-NoProfile", "-NonInteractive", "-EncodedCommand", kodiert],
-                          capture_output=True, timeout=60, **medien.OHNE_FENSTER)
-    if lauf.returncode != 0 or pfad.exists():
-        raise OSError(f"Papierkorb: {lauf.stderr.decode('utf-8', 'replace').strip()[-300:] or 'Datei liegt noch da'}")
+def papierkorb_ordner(ziel: Path, name: str) -> Path:
+    return ziel / PAPIERKORB / name
 
 
-def powershell() -> str:
-    """Voller Pfad, damit ein beschädigter PATH nicht stört."""
-    return str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32" / "WindowsPowerShell" / "v1.0"
-               / "powershell.exe")
-
-
-def roh_entsorgen(dateien: tuple[Path, ...], entsorgen: Callable[[Path], None]) -> list[str]:
+def in_den_papierkorb(dateien: tuple[Path, ...], korb: Path) -> list[str]:
+    """Rohdateien nach ``korb`` verschieben (umbenennen, über Laufwerke mit geprüfter Kopie). Nie löschen."""
     hinweise = []
+    korb.mkdir(parents=True, exist_ok=True)
     for p in dateien:
         try:
-            entsorgen(p)
+            verschieben(p, korb / p.name)
         except OSError as e:
-            hinweise.append(f"Rohdatei {p.name} nicht in den Papierkorb gelegt ({e}).")
+            hinweise.append(f"Rohdatei {p.name} nicht in {PAPIERKORB} gelegt ({e}).")
     return hinweise
 
 
@@ -349,6 +395,24 @@ def take_einsortieren(a: Path, b: Path, ziel: Path, stempel: str) -> dict:
     return {"ordner": ordner, "A": jetzt["A"], "B": jetzt["B"], "hinweise": hinweise}
 
 
+def arbeitsordner_anlegen(ziel: Path, name: str) -> Path:
+    """Arbeitsordner mit PID-Datei: so erkennt das Aufräumen, ob der Bau noch lebt."""
+    ziel.mkdir(parents=True, exist_ok=True)
+    arbeit = Path(tempfile.mkdtemp(dir=ziel, prefix=f"{ARBEIT_PRAEFIX}{name} "))
+    (arbeit / "pid.txt").write_text(str(os.getpid()), encoding="ascii")
+    return arbeit
+
+
+def arbeitsordner_behalten(arbeit: Path) -> Path:
+    """Nach einem Fehler: Arbeitsordner unter „~Fehler …“ liegen lassen (das Aufräumen fasst ihn nicht an)."""
+    neu = arbeit.with_name(FEHLER_PRAEFIX + arbeit.name.removeprefix(ARBEIT_PRAEFIX))
+    try:
+        arbeit.rename(neu)
+        return neu
+    except OSError:
+        return arbeit
+
+
 # ── Messen über ffmpeg ───────────────────────────────────────────────────────────────────────────
 
 def bewegung_lesen(aufruf: list[str], was: str) -> np.ndarray:
@@ -356,7 +420,8 @@ def bewegung_lesen(aufruf: list[str], was: str) -> np.ndarray:
     vielen Warnungen am vollen Puffer und die Schleife hängt."""
     fb = W * H * 3 // 2
     try:
-        p = subprocess.Popen(aufruf, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **medien.OHNE_FENSTER)
+        p = subprocess.Popen(aufruf, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             **medien.OHNE_FENSTER)
     except FileNotFoundError as e:
         raise StudioFehler("ffmpeg nicht gefunden. Ist ffmpeg im PATH?") from e
     fehler_teile: list[bytes] = []
@@ -387,10 +452,10 @@ def bewegung(pfad: Path, start_s: float, dauer_s: float, gpu: bool = False) -> n
     """Bewegungsenergie je Bild: mittlere Betragsdifferenz aufeinanderfolgender 128×72-Graubilder."""
     zeit = ["-ss", f"{start_s:.3f}", "-t", f"{dauer_s:.3f}"]
     aus = ["-f", "rawvideo", "-pix_fmt", "nv12", "-"]
-    cpu = ["ffmpeg", "-v", "error", *zeit, "-i", str(pfad), "-vf", f"scale={W}:{H}:flags=area", *aus]
+    cpu = [*medien.FFMPEG, "-v", "error", *zeit, "-i", medien.arg(pfad), "-vf", f"scale={W}:{H}:flags=area", *aus]
     if gpu:
-        gpu_aufruf = ["ffmpeg", "-v", "error", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", *zeit, "-i",
-                      str(pfad), "-vf", f"scale_cuda={W}:{H},hwdownload,format=nv12", *aus]
+        gpu_aufruf = [*medien.FFMPEG, "-v", "error", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", *zeit,
+                      "-i", medien.arg(pfad), "-vf", f"scale_cuda={W}:{H},hwdownload,format=nv12", *aus]
         try:
             return bewegung_lesen(gpu_aufruf, "Bewegung (GPU)")
         except StudioFehler:
@@ -400,8 +465,9 @@ def bewegung(pfad: Path, start_s: float, dauer_s: float, gpu: bool = False) -> n
 
 def ton_pruefsumme(pfad: Path) -> str:
     """MD5 der Tonpakete (ohne Dekodieren): gleich = bytegleiche Tonspur."""
-    return medien.lauf(["ffmpeg", "-v", "error", "-i", str(pfad), "-map", "0:a:0", "-c", "copy", "-f", "md5", "-"],
-                       f"Ton-Prüfsumme {pfad.name}").decode("ascii", "replace").strip().removeprefix("MD5=")
+    roh = medien.lauf([*medien.FFMPEG, "-v", "error", "-i", medien.arg(pfad), "-map", "0:a:0", "-c", "copy", "-f",
+                       "md5", "-"], f"Ton-Prüfsumme {pfad.name}")
+    return roh.decode("ascii", "replace").strip().removeprefix("MD5=")
 
 
 def _ton_versatz(ta: np.ndarray, tb: np.ndarray, start_s: float) -> tuple[float, float]:
@@ -420,12 +486,27 @@ def _bewegung_bericht(b: Bewegung) -> dict:
             "nebenmaximum": round(b.neben, 3), "bilder": b.bilder, "aussagekraeftig": b.aussagekraeftig}
 
 
+def ergebnis_nachpruefen(dateien: dict[str, Path], soll_bilder: int) -> list[str]:
+    """Vor dem Wegräumen der Rohdateien: liegen beide Ergebnisse am Zielort, haben Bild und Ton und so viele Bilder
+    wie die Rohdatei von Kamera A? Gibt die Gründe zurück, die dagegen sprechen."""
+    gruende = []
+    for cam, pfad in dateien.items():
+        if not pfad.is_file() or pfad.stat().st_size == 0:
+            gruende.append(f"Ergebnis {cam} fehlt oder ist leer")
+            continue
+        info = medien.video_info(pfad)
+        if not info["hat_ton"]:
+            gruende.append(f"Ergebnis {cam} hat keinen Ton")
+        if info["bilder"] != soll_bilder:
+            gruende.append(f"Ergebnis {cam} hat {info['bilder']} statt {soll_bilder} Bilder")
+    return gruende
+
+
 # ── Hauptlauf ────────────────────────────────────────────────────────────────────────────────────
 
 def synchronisieren(a: Path, b: Path, ziel: Path, stempel: str, einst: Einstellungen | None = None,
-                    probe: bool = False, roh_lassen: bool = False,
-                    entsorgen: Callable[[Path], None] = papierkorb) -> dict:
-    """Misst die Lücke, baut das Paar im Arbeitsordner, prüft es und legt genau zwei Videos in den Take-Ordner.
+                    probe: bool = False, roh_lassen: bool = False) -> dict:
+    """Misst die Lücke, baut das Paar im Arbeitsordner, prüft es und legt die zwei Videos in den Take-Ordner.
     ``probe``: nur messen, nichts schreiben. Gibt den Bericht zurück (``ok`` = grün)."""
     einst = einst or Einstellungen()
     for pfad, was in ((a, "Kamera A"), (b, "Kamera B")):
@@ -442,15 +523,16 @@ def synchronisieren(a: Path, b: Path, ziel: Path, stempel: str, einst: Einstellu
         uhr = time.perf_counter()
 
     ia, ib = medien.video_info(a), medien.video_info(b)
-    if abs(ia["fps"] - ib["fps"]) > 1e-3:
-        raise StudioFehler(f"Bildraten verschieden: A {ia['fps']:.3f}, B {ib['fps']:.3f}. Kameras und OBS gleich "
+    if medien.fps_bruch(ia) != medien.fps_bruch(ib):
+        raise StudioFehler(f"Bildraten verschieden: A {ia['fps_bruch']}, B {ib['fps_bruch']}. Kameras und OBS gleich "
                            "einstellen.")
     fps = ia["fps"]
+    bruch = medien.fps_bruch(ia)
     gpu = einst.encoder == "h264_nvenc"
-    bericht: dict = {"fassung": 1, "erzeugt": datetime.now(UTC).isoformat(timespec="seconds"),
+    bericht: dict = {"fassung": 2, "erzeugt": datetime.now(UTC).isoformat(timespec="seconds"),
                      "stempel": stempel, "quellen": {"A": str(a), "B": str(b)}, "info": {"A": ia, "B": ib}, "fps": fps}
 
-    # 1. Ton: Versatz im OBS-Takt, dazu die Klicks je Kamera
+    # 1. Ton: Versatz im OBS-Takt, dazu die Klicks je Kamera. d0/konfidenz gelten erst nach gelungener Zerlegung.
     zerlegung, konfidenz, drift, d0 = None, 0.0, 0.0, None
     klicks = {"A": 0, "B": 0}
     if ia["hat_ton"] and ib["hat_ton"]:
@@ -458,14 +540,16 @@ def synchronisieren(a: Path, b: Path, ziel: Path, stempel: str, einst: Einstellu
             ta, tb = medien.audio_laden(a, ANALYSE_RATE), medien.audio_laden(b, ANALYSE_RATE)
             dauer_b = len(tb) / ANALYSE_RATE
             start = min(1.0, max(0.0, dauer_b - MIN_FENSTER_S - 0.5))
-            d0, konfidenz = _ton_versatz(ta, tb, start)
+            d_mess, k_mess = _ton_versatz(ta, tb, start)
             ende = dauer_b - FENSTER_S - 1.0
-            drift = (_ton_versatz(ta, tb, ende)[0] - d0) if ende - start > FENSTER_S else 0.0
-            zerlegung = versatz_zerlegen(d0, fps)
+            drift_mess = (_ton_versatz(ta, tb, ende)[0] - d_mess) if ende - start > FENSTER_S else 0.0
+            zerlegung = versatz_zerlegen(d_mess, fps)
+            d0, konfidenz, drift = d_mess, k_mess, drift_mess
             bericht["ton"] = {"versatz_ms": round(d0 * 1000, 2), "konfidenz": round(konfidenz, 3),
                               "drift_ms": round(drift * 1000, 2),
                               "zerlegung": asdict(zerlegung) | {"rest_ms": round(zerlegung.rest_s * 1000, 2)}}
         except (KeinTon, ZuKurzeUeberlappung) as e:
+            zerlegung, konfidenz, drift, d0 = None, 0.0, 0.0, None
             bericht["ton"] = {"fehler": str(e)}
         klicks = {"A": klicks_zaehlen(medien.audio_laden(a, TON_RATE)),
                   "B": klicks_zaehlen(medien.audio_laden(b, TON_RATE))}
@@ -516,7 +600,6 @@ def synchronisieren(a: Path, b: Path, ziel: Path, stempel: str, einst: Einstellu
 
     # 3. Bauen im Arbeitsordner. Zeitachse = A (Stream-Copy), B wird darauf gelegt. Ton = Kamera mit den wenigsten
     #    Klicks, um den gemessenen Ton-Versatz auf die A-Zeitachse geschoben.
-    ziel.mkdir(parents=True, exist_ok=True)
     fest = "A"
     quellen = {"A": a, "B": b}
     ton_quelle = ton_wahl(klicks, fest) if d0 is not None else fest
@@ -532,16 +615,16 @@ def synchronisieren(a: Path, b: Path, ziel: Path, stempel: str, einst: Einstellu
     fenster = max(1.0, min(GEGENPROBE_FENSTER_S, dauer - 0.5))
     t0 = max(0.0, (dauer - fenster) / 2)
     name = ordner_name(stempel)
-    with tempfile.TemporaryDirectory(dir=ziel, prefix=f"~in Arbeit {name} ") as arbeit_name:
-        arbeit = Path(arbeit_name)
+    arbeit = arbeitsordner_anlegen(ziel, name)
+    try:
         teile = {"A": arbeit / f"{name} Cam A.mp4", "B": arbeit / f"{name} Cam B.mp4",
                  "ton": arbeit / f"{name} Ton.wav"}
         m4a = arbeit / "ton.m4a"
-        medien.lauf(befehl_ton(quellen[ton_quelle], plan.bilder, fps, teile["ton"], ton_versatz,
+        medien.lauf(befehl_ton(quellen[ton_quelle], plan.bilder, bruch, teile["ton"], ton_versatz,
                                (ia if ton_quelle == "A" else ib)["dauer"]), "Tonspur schreiben")
         medien.lauf(befehl_aac(teile["ton"], m4a), "Tonspur kodieren")
         stoppuhr("ton_bauen")
-        medien.lauf(befehl_neu(quellen["B"], m4a, plan, fps, teile["B"], einst.encoder, einst.cq,
+        medien.lauf(befehl_neu(quellen["B"], m4a, plan, bruch, teile["B"], einst.encoder, einst.cq,
                                DREHUNG_B[einst.drehung_b]), "Kamera B auf A legen")
         stoppuhr("cam_b_kodieren")
         medien.lauf(befehl_kopie(quellen["A"], m4a, teile["A"]), "Kamera A übernehmen")
@@ -570,22 +653,29 @@ def synchronisieren(a: Path, b: Path, ziel: Path, stempel: str, einst: Einstellu
         ordner, umbenannt, umzug = take_ordner_vorbereiten(ziel, name, rot)
         if umbenannt:
             hinweise.append(umbenannt)
-        for cam in ("A", "B"):
-            try:
-                teile[cam].replace(ordner / teile[cam].name)
-            except OSError as e:
-                raise StudioFehler(f"„{teile[cam].name}“ kann nicht in den Take-Ordner gelegt werden. Ist die Datei "
-                                   f"gerade in einem Programm geöffnet? ({e})") from e
+        hinweise += ablegen({"A": teile["A"], "B": teile["B"]}, ordner)
+    except BaseException as e:
+        behalten = arbeitsordner_behalten(arbeit)
+        if isinstance(e, StudioFehler):
+            raise StudioFehler(f"{e} Arbeitsordner zum Prüfen: {behalten}") from e
+        raise
+    shutil.rmtree(arbeit, ignore_errors=True)
 
     ausgaben = {cam: str(ordner / teile[cam].name) for cam in ("A", "B")}
     if not roh_lassen:
         quellen_jetzt = tuple(pfad_nach_umzug(p, umzug) for p in (a, b))
-        if rot or einst.rohdateien == "behalten":
+        gruende = [] if rot or einst.rohdateien == "behalten" else ergebnis_nachpruefen(
+            {cam: Path(p) for cam, p in ausgaben.items()}, ia["bilder"])
+        if rot or einst.rohdateien == "behalten" or gruende:
+            if gruende:
+                hinweise.append("Rohdateien bleiben (Nachprüfung vor dem Papierkorb): " + "; ".join(gruende))
             roh_ordner, roh_hinweise = roh_mitnehmen(ordner, quellen_jetzt)
             hinweise += roh_hinweise
             ausgaben["roh"] = str(roh_ordner)
         else:
-            hinweise += roh_entsorgen(quellen_jetzt, entsorgen)
+            korb = papierkorb_ordner(ziel, name)
+            hinweise += in_den_papierkorb(quellen_jetzt, korb)
+            ausgaben["papierkorb"] = str(korb)
         for p in quellen_jetzt:   # ein leer gewordener Roh-Ordner bleibt nicht zurück
             if p.parent.name == "Roh" and p.parent.is_dir() and not any(p.parent.iterdir()):
                 p.parent.rmdir()
@@ -594,7 +684,9 @@ def synchronisieren(a: Path, b: Path, ziel: Path, stempel: str, einst: Einstellu
     datei = bericht_pfad(ziel, name)
     datei.parent.mkdir(parents=True, exist_ok=True)
     bericht.update(pruefung=pruef, ok=not rot, ordner=str(ordner), ausgaben=ausgaben, bericht=str(datei))
-    datei.write_text(json.dumps(bericht, ensure_ascii=False, indent=2), encoding="utf-8")
+    teil = datei.with_name(datei.name + ".part")
+    teil.write_text(json.dumps(bericht, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(teil, datei)          # der Bericht darf ersetzt werden: er beschreibt immer den letzten Bau
     return bericht
 
 
@@ -612,7 +704,8 @@ def einrichten(unter) -> None:
     p.add_argument("--roh-lassen", action="store_true", help="die Rohdateien gar nicht anfassen")
     p.add_argument("--b-drehung", choices=tuple(DREHUNG_B), help="Kamera B drehen (ohne: [paar] drehung_b)")
     p.add_argument("--encoder", choices=("libx264", "h264_nvenc"), help="ohne: [paar] encoder (libx264)")
-    p.add_argument("--cq", type=int, help="Qualität der neu kodierten Kamera B (kleiner = besser)")
+    p.add_argument("--cq", type=int, choices=range(0, 52), metavar="0-51",
+                   help="Qualität der neu kodierten Kamera B (kleiner = besser)")
     p.add_argument("--ohne-gegenprobe", action="store_true", help="die Bewegungs-Gegenprobe nach dem Bauen weglassen")
     p.add_argument("--probe", action="store_true", help="nur messen und den Plan zeigen, nichts schreiben")
     p.add_argument("--json", action="store_true", help="den Bericht als JSON ausgeben")
@@ -638,7 +731,11 @@ def ausfuehren(args, konfig: Konfig) -> int:
         a, b, stempel = paar_finden(inbox, args.stempel, ziel, benennung)
     if not args.json:
         print(f"Paar {stempel}: {a.name} + {b.name}")
-    bericht = synchronisieren(a, b, ziel, stempel, einst, args.probe, args.roh_lassen)
+    if args.probe:
+        bericht = synchronisieren(a, b, ziel, stempel, einst, probe=True)
+    else:
+        with bau_sperre(ziel):
+            bericht = synchronisieren(a, b, ziel, stempel, einst, roh_lassen=args.roh_lassen)
     if args.json:
         print(json.dumps(bericht, ensure_ascii=False, indent=1))
         return 0 if bericht["ok"] else 1

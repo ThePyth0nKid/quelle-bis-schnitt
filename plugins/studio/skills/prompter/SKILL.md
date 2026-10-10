@@ -21,7 +21,7 @@ Abschnitt** im Glas, gilt:
 3. Projekt-Datei `prompter.toml` im Projektordner: welche Texte in welcher Reihenfolge in den Prompter kommen. Beispiel
    (vollständig in `studio prompter einspielen --help`):
    ```toml
-   praefix = "MUSTER "                         # Einträge mit diesem Anfang gehören dem Projekt
+   praefix = "MUSTER "                         # Pflicht, mind. 3 Zeichen: Einträge mit diesem Anfang gehören dem Projekt
    [[skript]]
    name = "MUSTER M01 · Wie ein Stromnetz atmet"
    datei = "F2_prompter.md"                    # relativ zu dieser Datei; Leerzeile = neuer Abschnitt

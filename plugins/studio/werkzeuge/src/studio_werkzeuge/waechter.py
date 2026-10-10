@@ -5,11 +5,13 @@ Bei Rec, nach einigen Sekunden: Liefern beide Kameras ein lebendes Bild (nicht s
 Dateien? Hat das Mikrofon Pegel? Wenn nicht: Hinweis (unter Windows als stille Benachrichtigung, sonst im Protokoll).
 Bei Stop: A und B des Takes kommen sofort nach ``<ziel>/<Take>/Roh/``, dann baut ``studio paar --stempel <Take>`` als
 eigener Prozess das Paar. Startet währenddessen eine neue Aufnahme, wird der Bau abgebrochen und danach wiederholt.
-Beim Start holt der Wächter Takes nach, die noch kein Paar haben, und Stempel aus ``<ziel>/synchron/neu_bauen.txt``.
+Beim Start und nach jedem Wiederverbinden, wenn die Verbindung während einer Aufnahme abriss, holt der Wächter Takes
+nach, die noch kein Paar haben, und Stempel aus ``<ziel>/synchron/neu_bauen.txt`` (erst nach dem Bau ausgetragen).
 
-``--einmal`` braucht kein OBS: holt alle offenen Takes nach und endet. ``--probe`` zeigt nur, was zu tun wäre.
-Protokoll: ``<ziel>/synchron/waechter.log``. Der Logger von obsws-python steht auf WARNING (sonst steht das Passwort im
-Protokoll). Schwellen der Startprüfung: einstellbare Voreinstellungen, nicht gemessen.
+``--einmal`` braucht kein OBS: holt alle offenen Takes nach und endet (Exit 1, wenn einer rot ist, 2 bei Fehlern).
+``--probe`` zeigt nur, was zu tun wäre. Protokoll: ``<ziel>/synchron/waechter.log``. Der Logger von obsws-python steht
+auf WARNING (sonst steht das Passwort im Protokoll). Schwellen der Startprüfung: einstellbare Voreinstellungen, nicht
+gemessen.
 """
 from __future__ import annotations
 
@@ -37,18 +39,20 @@ from studio_werkzeuge import medien, obs
 from studio_werkzeuge.fehler import StudioFehler
 from studio_werkzeuge.konfig import Konfig
 from studio_werkzeuge.paar import (
+    ARBEIT_PRAEFIX,
     PRUEFEN_ZUSATZ,
     STEMPEL_FORMAT,
     Benennung,
+    bau_sperre,
     benennung_aus,
     bericht_pfad,
     einstellungen_aus,
     ordner_name,
     paar_finden,
-    powershell,
     synchronisieren,
     take_einsortieren,
 )
+from studio_werkzeuge.sicher import Sperre, alter_s, ist_verknuepfung, prozess_lebt
 
 START_PRUEFUNG_S = 4.0
 MIKRO_FENSTER_S = 5.0
@@ -61,6 +65,7 @@ EINSORTIEREN_VERSUCHE = 10        # OBS gibt die Dateien erst kurz nach dem Stop
 EINSORTIEREN_PAUSE_S = 2.0
 HERZSCHLAG_S = 5.0
 NEUVERBINDEN_S = 10.0
+BAU_MAX_MIN = 60
 
 log = logging.getLogger("studio.waechter")
 
@@ -156,23 +161,42 @@ def ergebnis_text(stempel: str, rc: int, bericht: dict | None, fehler: str, ziel
     return f"Take {uhr}: Paar nicht gebaut", fehler or f"Exit {rc}"
 
 
-def bericht_lesen(ziel: Path, stempel: str) -> dict | None:
+def bericht_lesen(ziel: Path, stempel: str, nicht_vor: float | None = None) -> dict | None:
+    """Der Bericht des Takes; mit ``nicht_vor`` (Zeitstempel) nur, wenn er danach geschrieben wurde (nie ein alter)."""
     datei = bericht_pfad(ziel, ordner_name(stempel))
-    return json.loads(datei.read_text(encoding="utf-8")) if datei.is_file() else None
+    if not datei.is_file() or (nicht_vor is not None and datei.stat().st_mtime < nicht_vor):
+        return None
+    try:
+        return json.loads(datei.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
-def neu_bauen_lesen(datei: Path, benennung: Benennung | None = None) -> list[str]:
-    """Stempel aus ``neu_bauen.txt`` (eine Zeile je Take, ``#`` = Kommentar). Die Datei wird danach geleert."""
+def neu_bauen_lesen(datei: Path, benennung: Benennung | None = None) -> tuple[list[str], list[str]]:
+    """Stempel aus ``neu_bauen.txt`` (eine Zeile je Take, ``#`` = Kommentar) und die ungültigen Zeilen.
+    Die Datei bleibt unverändert; ausgetragen wird erst nach dem Bau (``neu_bauen_erledigt``)."""
     benennung = benennung or Benennung()
     if not datei.is_file():
-        return []
-    stempel = []
-    for zeile in datei.read_text(encoding="utf-8").splitlines():
-        zeile = zeile.split("#", 1)[0].strip()
-        if zeile and benennung.treffer(f"{benennung.praefix_a}{zeile}{benennung.endung}"):
-            stempel.append(zeile)
-    datei.write_text("", encoding="utf-8")
-    return sorted(set(stempel))
+        return [], []
+    stempel, ungueltig = [], []
+    for zeile in datei.read_text(encoding="utf-8-sig").splitlines():
+        inhalt = zeile.split("#", 1)[0].strip()
+        if not inhalt:
+            continue
+        if benennung.treffer(f"{benennung.praefix_a}{inhalt}{benennung.endung}"):
+            stempel.append(inhalt)
+        else:
+            ungueltig.append(zeile.strip())
+    return sorted(set(stempel)), ungueltig
+
+
+def neu_bauen_erledigt(datei: Path, erledigt: set[str]) -> None:
+    """Die gebauten Stempel aus ``neu_bauen.txt`` austragen; Kommentare und andere Zeilen bleiben."""
+    if not datei.is_file() or not erledigt:
+        return
+    bleiben = [z for z in datei.read_text(encoding="utf-8-sig").splitlines()
+               if z.split("#", 1)[0].strip() not in erledigt]
+    datei.write_text("\n".join(bleiben) + ("\n" if bleiben else ""), encoding="utf-8")
 
 
 def offene_takes(inbox: Path, ziel: Path, benennung: Benennung | None = None, laufend: str | None = None) -> list[str]:
@@ -196,12 +220,20 @@ def offene_takes(inbox: Path, ziel: Path, benennung: Benennung | None = None, la
     return sorted(offen)
 
 
-def arbeitsordner_aufraeumen(ziel: Path, stempel: str | None = None) -> list[Path]:
-    """Liegengebliebene „~in Arbeit …“-Ordner eines abgebrochenen Baus entfernen: die des Takes, ohne Stempel alle."""
+def arbeitsordner_aufraeumen(ziel: Path, stempel: str | None = None, max_alter_s: float = BAU_MAX_MIN * 60
+                             ) -> list[Path]:
+    """Liegengebliebene „~in Arbeit …“-Ordner abgebrochener Baus entfernen: die des Takes, ohne Stempel alle. Nur, wenn
+    der bauende Prozess tot ist (PID-Datei) oder der Ordner älter als ``max_alter_s`` ist; Verknüpfungen nie."""
     weg = []
-    muster = f"~in Arbeit {ordner_name(stempel)} *" if stempel else "~in Arbeit *"
+    muster = f"{ARBEIT_PRAEFIX}{ordner_name(stempel)} *" if stempel else f"{ARBEIT_PRAEFIX}*"
     for p in ziel.glob(muster) if ziel.is_dir() else []:
-        if p.is_dir():
+        if ist_verknuepfung(p) or not p.is_dir():
+            continue
+        try:
+            pid = int((p / "pid.txt").read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            pid = None
+        if (pid is not None and not prozess_lebt(pid)) or alter_s(p) > max_alter_s:
             shutil.rmtree(p, ignore_errors=True)
             weg.append(p)
     return weg
@@ -209,25 +241,34 @@ def arbeitsordner_aufraeumen(ziel: Path, stempel: str | None = None) -> list[Pat
 
 # ── Prozess- und System-Grenze ───────────────────────────────────────────────────────────────────
 
+def powershell() -> str:
+    """Voller Pfad, damit ein beschädigter PATH nicht stört."""
+    return str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32" / "WindowsPowerShell" / "v1.0"
+               / "powershell.exe")
+
+
+# Fester Skripttext: Titel und Text kommen nie hinein, sondern als XML über eine Umgebungsvariable.
+TOAST_SKRIPT = (
+    "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]"
+    " | Out-Null;"
+    "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null;"
+    "$x = New-Object Windows.Data.Xml.Dom.XmlDocument;"
+    "$x.LoadXml($env:STUDIO_TOAST_XML);"
+    "$t = New-Object Windows.UI.Notifications.ToastNotification $x;"
+    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
+    "'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show($t)")
+
+
 def hinweis(titel: str, text: str, windows: bool = True) -> None:
     """Stiller Windows-Hinweis (ohne Ton, ohne Fokus); sonst nur Protokoll."""
     log.info("Hinweis: %s · %s", titel, text)
     if not windows or os.name != "nt":
         return
-    xml = toast_xml(titel, text).replace("'", "''")
-    app = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
-    skript = (
-        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]"
-        " | Out-Null;"
-        "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null;"
-        "$x = New-Object Windows.Data.Xml.Dom.XmlDocument;"
-        f"$x.LoadXml('{xml}');"
-        "$t = New-Object Windows.UI.Notifications.ToastNotification $x;"
-        f"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{app}').Show($t)")
-    kodiert = base64.b64encode(skript.encode("utf-16-le")).decode("ascii")
+    kodiert = base64.b64encode(TOAST_SKRIPT.encode("utf-16-le")).decode("ascii")
+    umgebung = dict(os.environ, STUDIO_TOAST_XML=toast_xml(titel, text))
     try:
         subprocess.run([powershell(), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand",
-                        kodiert], capture_output=True, timeout=20, check=True, **medien.OHNE_FENSTER)
+                        kodiert], capture_output=True, timeout=20, check=True, env=umgebung, **medien.OHNE_FENSTER)
     except (OSError, subprocess.SubprocessError) as e:
         log.warning("Hinweis nicht gezeigt (%s)", e)
 
@@ -244,21 +285,8 @@ def baum_beenden(p: subprocess.Popen) -> None:
             p.terminate()
 
 
-def einzige_instanz(pfad: Path):
-    """Sperrdatei halten; None, wenn schon ein Wächter läuft."""
-    f = open(pfad, "a+b")  # noqa: SIM115 - bleibt offen, solange der Wächter lebt
-    f.seek(0)
-    try:
-        if os.name == "nt":
-            import msvcrt
-            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        f.close()
-        return None
-    return f
+def waechter_sperre(ziel: Path) -> Sperre:
+    return Sperre(ziel / "synchron" / "waechter.lock", "Ein anderer Wächter")
 
 
 def protokoll_einrichten(ordner: Path, vordergrund: bool) -> None:
@@ -277,30 +305,44 @@ def protokoll_einrichten(ordner: Path, vordergrund: bool) -> None:
 
 # ── Ohne OBS: einmal nachholen ───────────────────────────────────────────────────────────────────
 
-def einmal(konfig: Konfig, probe: bool = False) -> list[str]:
-    """Alle offenen Takes einsortieren und bauen (im selben Prozess). Gibt Zeilen für die Ausgabe zurück."""
+def einmal(konfig: Konfig, probe: bool = False) -> tuple[list[str], int]:
+    """Alle offenen Takes einsortieren und bauen (im selben Prozess, unter der Bau-Sperre des Ziels).
+    Rückgabe: Zeilen für die Ausgabe und Exit-Code (0 alles grün, 1 mindestens ein Take rot, 2 Fehler)."""
     inbox = konfig.pfad_wert("pfade", "inbox")
     ziel = konfig.pfad_wert("pfade", "ziel", inbox)
     benennung, einst = benennung_aus(konfig), einstellungen_aus(konfig)
-    neu = [] if probe else neu_bauen_lesen(ziel / "synchron" / "neu_bauen.txt", benennung)
-    zeilen = []
-    for s in sorted(set(offene_takes(inbox, ziel, benennung)) | set(neu)):
-        try:
-            a, b, _ = paar_finden(inbox, s, ziel, benennung)
-        except StudioFehler as e:
-            zeilen.append(f"Take {s}: nicht nachgeholt ({e})")
-            continue
-        if probe:
-            zeilen.append(f"Take {s}: würde einsortiert und gebaut ({a.name} + {b.name})")
-            continue
-        arbeitsordner_aufraeumen(ziel, s)
-        aus = take_einsortieren(a, b, ziel, s)
-        try:
-            bericht = synchronisieren(aus["A"], aus["B"], ziel, s, einst)
+    max_alter = konfig.zahl("waechter", "bau_max_min", BAU_MAX_MIN) * 60
+    neu_datei = ziel / "synchron" / "neu_bauen.txt"
+    neu, ungueltig = neu_bauen_lesen(neu_datei, benennung)
+    zeilen = [f"neu_bauen.txt: ungültige Zeile „{z}“ (bleibt stehen)" for z in ungueltig]
+    rc = 2 if ungueltig else 0
+    takes = sorted(set(offene_takes(inbox, ziel, benennung)) | set(neu))
+    if probe:
+        for s in takes:
+            try:
+                a, b, _ = paar_finden(inbox, s, ziel, benennung)
+                zeilen.append(f"Take {s}: würde einsortiert und gebaut ({a.name} + {b.name})")
+            except StudioFehler as e:
+                zeilen.append(f"Take {s}: nicht nachgeholt ({e})")
+        return zeilen or ["Keine offenen Takes."], rc
+    erledigt: set[str] = set()
+    with bau_sperre(ziel):
+        for s in takes:
+            try:
+                a, b, _ = paar_finden(inbox, s, ziel, benennung)
+                arbeitsordner_aufraeumen(ziel, s, max_alter)
+                aus = take_einsortieren(a, b, ziel, s)
+                bericht = synchronisieren(aus["A"], aus["B"], ziel, s, einst)
+            except StudioFehler as e:
+                zeilen.append(f"Take {s}: Paar nicht gebaut ({e})")
+                rc = 2
+                continue
+            erledigt.add(s)
             zeilen.append(f"Take {s}: {'GRÜN' if bericht['ok'] else 'ROT, prüfen'} → {bericht['ordner']}")
-        except StudioFehler as e:
-            zeilen.append(f"Take {s}: Paar nicht gebaut ({e})")
-    return zeilen or ["Keine offenen Takes."]
+            if not bericht["ok"]:
+                rc = max(rc, 1)
+    neu_bauen_erledigt(neu_datei, erledigt & set(neu))
+    return zeilen or ["Keine offenen Takes."], rc
 
 
 # ── Mit OBS ──────────────────────────────────────────────────────────────────────────────────────
@@ -313,16 +355,18 @@ class Waechter:
         self.inbox = konfig.pfad_wert("pfade", "inbox")
         self.ziel = konfig.pfad_wert("pfade", "ziel", self.inbox)
         self.benennung = benennung_aus(konfig)
-        self.quellen = {k.upper(): str(konfig.wert("kameras", f"quelle_{k}", "")) for k in "ab"}
-        self.filter_a = str(konfig.wert("kameras", "filter_a", ""))
-        self.windows_hinweis = bool(konfig.wert("waechter", "windows_hinweis", True))
-        self.startpruefung = bool(konfig.wert("waechter", "startpruefung", True))
-        self.bau_max_s = float(konfig.wert("waechter", "bau_max_min", 60)) * 60
+        self.quellen = {k.upper(): konfig.text("kameras", f"quelle_{k}", "") for k in "ab"}
+        self.filter_a = konfig.text("kameras", "filter_a", "")
+        self.windows_hinweis = konfig.wahrheit("waechter", "windows_hinweis", True)
+        self.startpruefung = konfig.wahrheit("waechter", "startpruefung", True)
+        self.bau_max_s = konfig.zahl("waechter", "bau_max_min", BAU_MAX_MIN) * 60
         self.req_fabrik = req_fabrik or (lambda: obs.verbinden(konfig))
         self.ereignis_fabrik = ereignis_fabrik or (lambda **kw: obs.ereignis_client(konfig, **kw))
         self.nimmt_auf = threading.Event()
         self.auftraege: queue.Queue[str] = queue.Queue()
         self.vorgemerkt: set[str] = set()
+        self.neu_bauen: set[str] = set()
+        self.bau_start: dict[str, float] = {}
         self.merk_lock = threading.Lock()
         self.req_lock = threading.RLock()
         self.start_zeit: datetime | None = None
@@ -330,6 +374,7 @@ class Waechter:
         self.ev = None
         self.mikro_name: str | None = None
         self.nachgeholt = False
+        self.verlust_waehrend_aufnahme = False
 
     def melde(self, titel: str, text: str) -> None:
         hinweis(titel, text, self.windows_hinweis)
@@ -357,6 +402,22 @@ class Waechter:
             self.ev.callback.register(self.on_record_state_changed)
         log.info("mit OBS verbunden (Mikrofon der Filter: %s, Aufnahme läuft: %s)", self.mikro_name,
                  self.nimmt_auf.is_set())
+
+    def nach_verbinden(self) -> bool:
+        """Nachholen beim ersten Verbinden und nach einem Abriss mitten in einer Aufnahme (ein Stop kann dabei
+        verloren gegangen sein). Gibt zurück, ob nachgeholt wird."""
+        if self.nachgeholt and not self.verlust_waehrend_aufnahme:
+            return False
+        self.nachgeholt, self.verlust_waehrend_aufnahme = True, False
+        threading.Thread(target=self.nachholen, daemon=True).start()
+        return True
+
+    def verbindung_verloren(self) -> None:
+        """Den Aufnahmezustand NICHT still löschen: unbekannt heißt vorsichtshalber „nimmt auf“ (kein Bau startet,
+        bis OBS wieder antwortet und den echten Zustand meldet)."""
+        if self.nimmt_auf.is_set():
+            self.verlust_waehrend_aufnahme = True
+        self.trennen()
 
     def trennen(self) -> None:
         with self.req_lock:
@@ -438,7 +499,7 @@ class Waechter:
                 probleme.append(f"Mikrofon: {urteil}")
         except Exception as e:  # noqa: BLE001 - die Prüfung darf die Aufnahme nie stören
             log.exception("Startprüfung abgebrochen")
-            probleme.append(f"Prüfung unvollständig ({e})")
+            probleme.append(f"Prüfung unvollständig ({type(e).__name__})")
         if not self._gilt_noch(start):
             return
         if probleme:
@@ -494,10 +555,14 @@ class Waechter:
         log.warning("Take %s nur zum Teil einsortiert: %s", stempel, " · ".join(aus["hinweise"]))
 
     def nachholen(self) -> None:
-        for p in arbeitsordner_aufraeumen(self.ziel):
+        for p in arbeitsordner_aufraeumen(self.ziel, max_alter_s=self.bau_max_s):
             log.info("Arbeitsordner eines abgebrochenen Baus entfernt: %s", p.name)
         laufend = stempel_aus_zeit(self.start_zeit) if self.nimmt_auf.is_set() and self.start_zeit else None
-        neu = neu_bauen_lesen(self.ziel / "synchron" / "neu_bauen.txt", self.benennung)
+        neu, ungueltig = neu_bauen_lesen(self.ziel / "synchron" / "neu_bauen.txt", self.benennung)
+        for zeile in ungueltig:
+            log.warning("neu_bauen.txt: ungültige Zeile „%s“ (bleibt stehen)", zeile)
+        with self.merk_lock:
+            self.neu_bauen |= set(neu)
         for s in sorted(set(offene_takes(self.inbox, self.ziel, self.benennung, laufend)) | set(neu)):
             try:
                 paar_finden(self.inbox, s, self.ziel, self.benennung)
@@ -511,15 +576,16 @@ class Waechter:
         """(Exit-Code, fertig). fertig=False: abgebrochen, weil eine Aufnahme begann."""
         synchron = self.ziel / "synchron"
         synchron.mkdir(parents=True, exist_ok=True)
-        arbeitsordner_aufraeumen(self.ziel, stempel)
+        arbeitsordner_aufraeumen(self.ziel, stempel, self.bau_max_s)
         umgebung = dict(os.environ, PYTHONUTF8="1")
         if self.konfig.pfad is not None:
             umgebung["STUDIO_KONFIG"] = str(self.konfig.pfad)
         aufruf = [sys.executable, "-m", "studio_werkzeuge", "paar", "--stempel", stempel]
         extra = {} if os.name == "nt" else {"start_new_session": True}
+        self.bau_start[stempel] = time.time()
         with open(synchron / f"waechter-{stempel}.log", "wb") as aus:
-            p = subprocess.Popen(aufruf, stdout=aus, stderr=subprocess.STDOUT, env=umgebung, **medien.OHNE_FENSTER,
-                                 **extra)
+            p = subprocess.Popen(aufruf, stdin=subprocess.DEVNULL, stdout=aus, stderr=subprocess.STDOUT, env=umgebung,
+                                 **medien.OHNE_FENSTER, **extra)
             beginn = time.monotonic()
             while p.poll() is None:
                 if self.nimmt_auf.is_set():
@@ -536,13 +602,22 @@ class Waechter:
         return p.returncode, True
 
     def melden(self, stempel: str, rc: int) -> None:
-        bericht = bericht_lesen(self.ziel, stempel) if rc in (0, 1) else None
+        # Nur ein Bericht, der nach dem Start DIESES Baus geschrieben wurde (nie ein alter aus einem früheren Lauf).
+        bericht = bericht_lesen(self.ziel, stempel, self.bau_start.get(stempel)) if rc in (0, 1) else None
         datei = self.ziel / "synchron" / f"waechter-{stempel}.log"
         zeilen = datei.read_text(encoding="utf-8", errors="replace").strip().splitlines() if datei.is_file() else []
         fehler = next((z for z in reversed(zeilen) if z.startswith("FEHLER")), zeilen[-1] if zeilen else "")
+        if rc in (0, 1) and bericht is None:
+            rc, fehler = 2, "Bau endete ohne neuen Bericht"
         titel, text = ergebnis_text(stempel, rc, bericht, fehler, self.ziel)
         (log.info if rc == 0 else log.warning)("%s: %s", titel, text)
         self.melde(titel, text)
+        if rc in (0, 1):
+            with self.merk_lock:
+                gebaut = stempel in self.neu_bauen
+                self.neu_bauen.discard(stempel)
+            if gebaut:
+                neu_bauen_erledigt(self.ziel / "synchron" / "neu_bauen.txt", {stempel})
 
     def arbeiten(self) -> None:
         while True:
@@ -570,9 +645,7 @@ class Waechter:
                 if wartet_seit is not None:
                     log.info("OBS nach %.0f s wieder da", time.monotonic() - wartet_seit)
                     wartet_seit = None
-                if not self.nachgeholt:
-                    self.nachgeholt = True
-                    threading.Thread(target=self.nachholen, daemon=True).start()
+                self.nach_verbinden()
                 while True:
                     time.sleep(HERZSCHLAG_S)
                     self.anfrage("GetVersion")
@@ -580,8 +653,7 @@ class Waechter:
                 if wartet_seit is None:
                     wartet_seit = time.monotonic()
                     log.info("OBS nicht erreichbar (%s); neuer Versuch alle %.0f s", type(e).__name__, NEUVERBINDEN_S)
-                self.trennen()
-                self.nimmt_auf.clear()
+                self.verbindung_verloren()
                 time.sleep(NEUVERBINDEN_S)
 
 
@@ -598,18 +670,22 @@ def einrichten(unter) -> None:
 
 def ausfuehren(args, konfig: Konfig) -> int:
     if args.einmal or args.probe:
-        for zeile in einmal(konfig, probe=args.probe):
+        zeilen, rc = einmal(konfig, probe=args.probe)
+        for zeile in zeilen:
             print(zeile)
         if args.probe and not args.einmal:
             print("Probe: ohne --einmal liefe der Wächter dauerhaft mit OBS.")
-        return 0
+        return rc
     inbox = konfig.pfad_wert("pfade", "inbox")
-    synchron = konfig.pfad_wert("pfade", "ziel", inbox) / "synchron"
-    protokoll_einrichten(synchron, args.vordergrund)
-    sperre = einzige_instanz(synchron / "waechter.lock")
-    if sperre is None:
+    ziel = konfig.pfad_wert("pfade", "ziel", inbox)
+    sperre = waechter_sperre(ziel)
+    if not sperre.versuchen():           # vor dem Protokoll: ein zweiter Wächter schreibt nichts
         print("Ein Wächter läuft schon; dieser endet.")
         return 0
-    log.info("Wächter gestartet (PID %s)", os.getpid())
-    Waechter(konfig).laufen()
+    try:
+        protokoll_einrichten(ziel / "synchron", args.vordergrund)
+        log.info("Wächter gestartet (PID %s)", os.getpid())
+        Waechter(konfig).laufen()
+    finally:
+        sperre.freigeben()
     return 0

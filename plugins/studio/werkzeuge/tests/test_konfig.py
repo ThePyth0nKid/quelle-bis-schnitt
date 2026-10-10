@@ -88,3 +88,23 @@ def test_maskiert_und_zeigen(tmp_path, monkeypatch, hilfe):
     assert "geheim" not in text and "Variable NICHT gesetzt" in text
     monkeypatch.setenv("OBS_PW", "x")
     assert "(Variable gesetzt)" in konfig.zeigen(k)
+
+
+def test_typen_werden_geprueft(tmp_path, hilfe):
+    k = hilfe.konfig_aus(tmp_path, '[paar]\ncq = "achtzehn"\ngegenprobe = "ja"\n[mastern]\nziel_lufs = true\n'
+                                   '[obs]\nport = 4455\nhost = 7\n')
+    for aufruf in (lambda: k.ganzzahl("paar", "cq"), lambda: k.wahrheit("paar", "gegenprobe"),
+                   lambda: k.zahl("mastern", "ziel_lufs"), lambda: k.text("obs", "host")):
+        with pytest.raises(KonfigFehler, match="muss"):
+            aufruf()
+    assert k.ganzzahl("obs", "port") == 4455 and k.zahl("obs", "port") == 4455.0
+
+
+def test_bom_und_maskierung_und_hostwarnung(tmp_path, hilfe):
+    datei = tmp_path / "studio.toml"
+    datei.write_bytes("\ufeff[obs]\nhost = \"192.0.2.1\"\nkennwort = \"x\"\n[transkript.fern]\n"
+                      "befehl = [\"ssh\", \"rechner\"]\n".encode())
+    k = konfig.laden(datei)
+    text = konfig.zeigen(k)
+    assert "[… 2 Argumente …]" in text and "rechner" not in text and "'***'" in text
+    assert "nicht dieser Rechner" in text

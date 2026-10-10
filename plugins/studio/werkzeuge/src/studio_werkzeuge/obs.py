@@ -12,7 +12,7 @@ import logging
 import os
 from typing import Any, Protocol
 
-from studio_werkzeuge.fehler import StudioFehler
+from studio_werkzeuge.fehler import KonfigFehler, StudioFehler
 from studio_werkzeuge.konfig import Konfig
 
 
@@ -31,9 +31,11 @@ def _obsws():
 
 def zugang(konfig: Konfig) -> dict:
     """Host, Port und Passwort (aus der Umgebungsvariable)."""
-    name = str(konfig.wert("obs", "passwort_umgebung", "OBS_WEBSOCKET_PASSWORT"))
-    return {"host": str(konfig.wert("obs", "host", "127.0.0.1")), "port": int(konfig.wert("obs", "port", 4455)),
-            "password": os.environ.get(name, "")}
+    name = konfig.text("obs", "passwort_umgebung", "OBS_WEBSOCKET_PASSWORT")
+    port = konfig.ganzzahl("obs", "port", 4455)
+    if not 0 < port < 65536:
+        raise KonfigFehler(f"[obs] port {port} liegt außerhalb 1–65535.")
+    return {"host": konfig.text("obs", "host", "127.0.0.1"), "port": port, "password": os.environ.get(name, "")}
 
 
 def verbinden(konfig: Konfig, timeout: float = 5.0) -> Client:

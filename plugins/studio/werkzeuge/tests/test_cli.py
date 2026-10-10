@@ -53,3 +53,21 @@ def test_konfig_vorlage_und_zeigen(tmp_path, capsys):
 def test_als_modul_aufrufbar():
     r = subprocess.run([sys.executable, "-m", "studio_werkzeuge", "--version"], capture_output=True, text=True)
     assert r.returncode == 0 and __version__ in r.stdout
+
+
+def test_unerwarteter_fehler_ist_exit_2_nie_befund(monkeypatch, tmp_path, capsys):
+    from studio_werkzeuge import klicks
+
+    def wirft(args, konfig):
+        raise OSError("Datenträger fehlt")
+
+    monkeypatch.setattr(klicks, "ausfuehren", wirft)
+    assert main(["klick-check", str(tmp_path / "x.wav")]) == 2
+    assert "FEHLER: OSError" in capsys.readouterr().err
+
+
+def test_falscher_typ_in_der_konfiguration_ist_exit_2(tmp_path, capsys):
+    k = tmp_path / "studio.toml"
+    k.write_text('[klicks]\nfaktor = "zwölf"\n', encoding="utf-8")
+    assert main(["--konfig", str(k), "klick-check", str(tmp_path / "x.wav")]) == 2
+    assert "[klicks] faktor" in capsys.readouterr().err

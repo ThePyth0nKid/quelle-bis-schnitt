@@ -69,6 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     except StudioFehler as e:
         print(f"FEHLER: {e}", file=sys.stderr)
         return 2
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        # Unerwartet, aber nie als Befund (Exit 1) verbuchen: ein Fehler ist ein Fehler (Exit 2), ohne Traceback.
+        # json.JSONDecodeError und UnicodeError sind Unterklassen von ValueError.
+        print(f"FEHLER: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         return 130
 

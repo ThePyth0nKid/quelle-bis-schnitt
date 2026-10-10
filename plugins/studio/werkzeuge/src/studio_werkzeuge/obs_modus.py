@@ -14,6 +14,8 @@ eine Aufnahme, bricht das Werkzeug ab. ``--probe`` zeigt nur, was sich ändern w
 from __future__ import annotations
 
 import json
+import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -21,9 +23,12 @@ from studio_werkzeuge import obs
 from studio_werkzeuge.fehler import KonfigFehler, StudioFehler
 from studio_werkzeuge.konfig import Konfig
 
+# Source Record kann auch streamen: Server und Schlüssel stehen dann in den Filtereinstellungen.
+GEHEIM = re.compile(r"(key|token|pass|secret|auth|server|kennwort|schluessel)", re.IGNORECASE)
+
 
 def filterliste(konfig: Konfig) -> list[tuple[str, str]]:
-    return [(str(konfig.wert("kameras", f"quelle_{k}")), str(konfig.wert("kameras", f"filter_{k}"))) for k in "ab"]
+    return [(konfig.text("kameras", f"quelle_{k}"), konfig.text("kameras", f"filter_{k}")) for k in "ab"]
 
 
 def modi(konfig: Konfig) -> dict[str, dict]:
@@ -54,15 +59,33 @@ def filter_lesen(client: obs.Client, quelle: str, name: str) -> dict:
             "aktiv": f["filterEnabled"], "einstellungen": dict(f.get("filterSettings") or {})}
 
 
+def geheime_schluessel(stand: list[dict]) -> list[str]:
+    """Schlüssel, die nach Zugangsdaten aussehen und einen Wert haben (z. B. Stream-Server und -Schlüssel)."""
+    return sorted({k for s in stand for k, v in s["einstellungen"].items() if GEHEIM.search(k) and v not in ("", None)})
+
+
 def sichern(stand: list[dict], ordner: Path) -> Path:
+    """Vollständige Sicherung (sie muss sich zurückspielen lassen). Unter POSIX nur für den Besitzer lesbar (0600)."""
     ordner.mkdir(parents=True, exist_ok=True)
     ziel = ordner / f"obs-filter-{datetime.now():%Y%m%d-%H%M%S}.json"
     zaehler = 2
     while ziel.exists():
         ziel = ordner / f"obs-filter-{datetime.now():%Y%m%d-%H%M%S}-{zaehler}.json"
         zaehler += 1
-    ziel.write_text(json.dumps(stand, ensure_ascii=False, indent=1), encoding="utf-8")
+    fd = os.open(ziel, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(stand, ensure_ascii=False, indent=1))
     return ziel
+
+
+def zurueckspielen(client: obs.Client, s: dict) -> None:
+    """Den Filter mit den gesicherten Einstellungen an alter Stelle wieder anlegen."""
+    ziel = {"sourceName": s["quelle"], "filterName": s["filter"]}
+    client.send("CreateSourceFilter", {**ziel, "filterKind": s["kind"], "filterSettings": s["einstellungen"]},
+                raw=True)
+    client.send("SetSourceFilterIndex", {**ziel, "filterIndex": s["index"]}, raw=True)
+    if not s["aktiv"]:
+        client.send("SetSourceFilterEnabled", {**ziel, "filterEnabled": False}, raw=True)
 
 
 def umschalten(client: obs.Client, filter_: list[tuple[str, str]], modus: str, alle_modi: dict[str, dict],
@@ -85,15 +108,27 @@ def umschalten(client: obs.Client, filter_: list[tuple[str, str]], modus: str, a
         return zeilen
     if sicherungsordner is None:
         raise KonfigFehler("[obs_modus] sicherung fehlt: ohne Sicherung wird nichts verändert.")
-    zeilen.append(f"Sicherung: {sichern(stand, sicherungsordner)}")
+    sicherung = sichern(stand, sicherungsordner)
+    zeilen.append(f"Sicherung: {sicherung}")
+    if geheim := geheime_schluessel(stand):
+        zeilen.append(f"  ! Die Sicherung enthält Zugangsdaten ({', '.join(geheim)}): Datei geschützt aufbewahren, "
+                      "nicht weitergeben.")
     for s in stand:
         neu = neue_einstellungen(s["einstellungen"], alle_modi[modus], alle_modi)
         ziel = {"sourceName": s["quelle"], "filterName": s["filter"]}
         client.send("RemoveSourceFilter", ziel, raw=True)
-        client.send("CreateSourceFilter", {**ziel, "filterKind": s["kind"], "filterSettings": neu}, raw=True)
-        client.send("SetSourceFilterIndex", {**ziel, "filterIndex": s["index"]}, raw=True)
-        if not s["aktiv"]:
-            client.send("SetSourceFilterEnabled", {**ziel, "filterEnabled": False}, raw=True)
+        try:
+            client.send("CreateSourceFilter", {**ziel, "filterKind": s["kind"], "filterSettings": neu}, raw=True)
+            client.send("SetSourceFilterIndex", {**ziel, "filterIndex": s["index"]}, raw=True)
+            if not s["aktiv"]:
+                client.send("SetSourceFilterEnabled", {**ziel, "filterEnabled": False}, raw=True)
+        except Exception as e:  # noqa: BLE001 - jede Störung beim Neuanlegen: alten Filter zurück
+            try:
+                zurueckspielen(client, s)
+                wieder = "der alte Filter ist wieder angelegt"
+            except Exception:  # noqa: BLE001
+                wieder = f"der alte Filter ließ sich NICHT zurückspielen, Einstellungen stehen in {sicherung}"
+            raise StudioFehler(f"{s['quelle']}: Neuanlegen gescheitert ({type(e).__name__}); {wieder}.") from e
         g = filter_lesen(client, s["quelle"], s["filter"])
         zeilen.append(f"{s['quelle']}: {kurz(s['einstellungen'])} → {kurz(g['einstellungen'])} · Position {g['index']} "
                       f"· aktiv={g['aktiv']}")

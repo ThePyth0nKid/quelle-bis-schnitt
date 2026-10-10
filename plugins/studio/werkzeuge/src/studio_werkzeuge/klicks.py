@@ -94,12 +94,12 @@ def bewerten(x: np.ndarray, name: str, schwellen: dict, rate: int = RATE) -> Bef
 
 def schwellen_aus(konfig: Konfig) -> dict:
     return {
-        "faktor": float(konfig.wert("klicks", "faktor", FAKTOR)),
-        "minimum": float(konfig.wert("klicks", "minimum", MINIMUM)),
-        "gruen_unter": float(konfig.wert("klicks", "gruen_unter", GRUEN_UNTER)),
-        "rot_ueber": float(konfig.wert("klicks", "rot_ueber", ROT_UEBER)),
-        "pegel_bezug_dbfs": float(konfig.wert("klicks", "pegel_bezug_dbfs", PEGEL_BEZUG_DBFS)),
-        "pegel_toleranz_db": float(konfig.wert("klicks", "pegel_toleranz_db", PEGEL_TOLERANZ_DB)),
+        "faktor": konfig.zahl("klicks", "faktor", FAKTOR),
+        "minimum": konfig.zahl("klicks", "minimum", MINIMUM),
+        "gruen_unter": konfig.zahl("klicks", "gruen_unter", GRUEN_UNTER),
+        "rot_ueber": konfig.zahl("klicks", "rot_ueber", ROT_UEBER),
+        "pegel_bezug_dbfs": konfig.zahl("klicks", "pegel_bezug_dbfs", PEGEL_BEZUG_DBFS),
+        "pegel_toleranz_db": konfig.zahl("klicks", "pegel_toleranz_db", PEGEL_TOLERANZ_DB),
     }
 
 

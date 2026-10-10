@@ -6,8 +6,9 @@ Kameramarken wie ``[A]`` oder ``[B]`` gelten ab ihrer Stelle und stehen danach v
 bleiben eigene Abschnitte. Nicht getrennt wird nach Ordnungszahlen („3. Oktober“) und nach üblichen Kürzeln.
 
 ``einspielen`` legt die Texte eines Projekts (``prompter.toml``) in den Prompter von Elgato Camera Hub. Vorerst nur
-Windows. Ablauf: prüfen, dass OBS nicht aufnimmt → Datenordner sichern → Camera Hub hart beenden (nur der Prozess aus
-``[prompter] prozessname``) → schreiben → neu starten.
+Windows. Ablauf: Projekt und ``AppSettings.json`` prüfen → prüfen, dass OBS nicht aufnimmt → Datenordner sichern →
+Camera Hub hart beenden (nur der Prozess aus ``[prompter] prozessname``) → Bestand lesen → schreiben → neu starten.
+Scheitert das Schreiben mittendrin, wird NICHT neu gestartet; die Sicherung liegt bereit.
 
 F1 · Änderungen verschwinden. Symptom: nach dem nächsten Beenden von Camera Hub sind die neuen Texte weg. Ursache:
 Camera Hub schreibt beim ordentlichen Beenden seinen Speicherstand zurück. Gegenmittel: vor dem Schreiben hart beenden
@@ -23,13 +24,14 @@ Aufnahme trifft den Dreh. Gegenmittel: vor dem Beenden per obs-websocket prüfen
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import time
-import tomllib
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
@@ -38,29 +40,36 @@ from pathlib import Path
 
 from studio_werkzeuge import obs
 from studio_werkzeuge.fehler import KonfigFehler, NurWindows, StudioFehler
-from studio_werkzeuge.konfig import Konfig
+from studio_werkzeuge.konfig import Konfig, toml_lesen
 
-KUERZEL = ("z. B.", "z.B.", "d. h.", "d.h.", "u. a.", "u.a.", "bzw.", "ca.", "Nr.", "etc.", "vgl.", "Dr.", "Mio.",
-           "Mrd.")
+KUERZEL_MIT_LEERZEICHEN = ("z. B.", "Z. B.", "d. h.", "D. h.", "u. a.", "U. a.")
 SCHUTZ = "\x00"
+# Kürzel nur mit Wortgrenze davor: „ca.“ ist ein Kürzel, „Mallorca.“ ein Satzende.
+KUERZEL_ENDE = re.compile(r"(?<![\w\x00])(?:ca|Nr|Dr|bzw|etc|vgl|Mio|Mrd|[zZ]\.\x00?B|[dD]\.\x00?h|[uU]\.\x00?a)\.$")
 GRENZE = re.compile(r"(?<=[.!?])([\"“”»«']?)\s+(?=[A-ZÄÖÜ0-9\[„\"])")
 LIBRARY_KEY = "applogic.prompter.libraryList"
 MAX_NAME = 80
+MIN_PRAEFIX = 3
 GUID_MUSTER = re.compile(r"^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$")
+PROZESSNAME = re.compile(r"^[\w .-]+\.exe$")
+# Diese Prozesse beendet das Werkzeug nie, egal was in der Konfiguration steht.
+NIE_BEENDEN = {"obs64.exe", "obs32.exe", "obs.exe", "resolve.exe", "explorer.exe", "svchost.exe", "csrss.exe",
+               "wininit.exe", "winlogon.exe", "lsass.exe", "services.exe", "smss.exe", "dwm.exe", "system",
+               "python.exe", "pythonw.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe", "taskmgr.exe",
+               "ffmpeg.exe", "claude.exe", "node.exe", "code.exe"}
 
 
 # ── Sätze ────────────────────────────────────────────────────────────────────────────────────────
 
 def saetze(absatz: str) -> list[str]:
     """Teilt einen Absatz in Sätze und lässt Ordnungszahlen und Kürzel ganz."""
-    for k in KUERZEL:
-        if " " in k:
-            absatz = absatz.replace(k, k.replace(" ", SCHUTZ))
+    for k in KUERZEL_MIT_LEERZEICHEN:
+        absatz = absatz.replace(k, k.replace(" ", SCHUTZ))
     roh = GRENZE.split(absatz)
     teile = [roh[i] + (roh[i + 1] if i + 1 < len(roh) else "") for i in range(0, len(roh), 2)]
     zusammen: list[str] = []
     for t in teile:
-        if zusammen and (re.search(r"\b\d+\.$", zusammen[-1]) or zusammen[-1].endswith(KUERZEL)):
+        if zusammen and (re.search(r"\b\d+\.$", zusammen[-1]) or KUERZEL_ENDE.search(zusammen[-1])):
             zusammen[-1] = f"{zusammen[-1]} {t}"
         else:
             zusammen.append(t)
@@ -98,7 +107,8 @@ def schreiben_ohne_ueberschreiben(ziel: Path, inhalt: str) -> str:
         if ziel.read_text(encoding="utf-8-sig") == inhalt:
             return "schon da und gleich"
         raise StudioFehler(f"{ziel} gibt es schon mit anderem Inhalt. Nie überschreiben: neuen Namen wählen.")
-    ziel.write_text(inhalt, encoding="utf-8")
+    with open(ziel, "x", encoding="utf-8") as f:
+        f.write(inhalt)
     return "geschrieben"
 
 
@@ -119,17 +129,21 @@ class Projekt:
 
 
 def projekt_laden(datei: Path) -> Projekt:
-    """``prompter.toml``: ``praefix`` (optional) und ``[[skript]]`` mit ``name`` und ``datei`` (relativ)."""
+    """``prompter.toml``: ``praefix`` (Pflicht, mindestens 3 Zeichen; daran erkennt das Werkzeug seine eigenen Einträge)
+    und ``[[skript]]`` mit ``name`` und ``datei`` (relativ)."""
     if not datei.is_file():
         raise StudioFehler(f"{datei} fehlt. Vorlage: siehe `studio prompter einspielen --help`.")
-    try:
-        daten = tomllib.loads(datei.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as e:
-        raise KonfigFehler(f"{datei} ist kein gültiges TOML: {e}") from e
+    daten = toml_lesen(datei)
     projekt = Projekt([], str(daten.get("praefix", "")))
+    if len(projekt.praefix.strip()) < MIN_PRAEFIX:
+        projekt.fehler.append(f"praefix fehlt oder ist kürzer als {MIN_PRAEFIX} Zeichen: daran erkennt das Werkzeug "
+                              "seine eigenen Einträge (nur die werden aktualisiert oder aufgeräumt).")
     for eintrag in daten.get("skript", []):
+        if not isinstance(eintrag, dict):
+            projekt.fehler.append(f"[[skript]]-Eintrag ist keine Tabelle: {eintrag!r}")
+            continue
         name, quelle = str(eintrag.get("name", "")).strip(), eintrag.get("datei")
-        if not name or not quelle:
+        if not name or not isinstance(quelle, str) or not quelle:
             projekt.fehler.append(f"Eintrag ohne name oder datei: {eintrag}")
             continue
         pfad = (datei.parent / quelle).resolve()
@@ -147,9 +161,22 @@ def projekt_laden(datei: Path) -> Projekt:
     for doppelt in sorted(n for n, c in Counter(p.name for p in projekt.posten).items() if c > 1):
         projekt.fehler.append(f"Name „{doppelt}“ kommt mehrfach vor")
     if projekt.praefix and any(not p.name.startswith(projekt.praefix) for p in projekt.posten):
-        projekt.fehler.append(f"Jeder Name muss mit dem praefix „{projekt.praefix}“ beginnen (sonst räumt ein späterer "
-                              "Lauf ihn als fremd nicht auf).")
+        projekt.fehler.append(f"Jeder Name muss mit dem praefix „{projekt.praefix}“ beginnen.")
     return projekt
+
+
+def prozessname_pruefen(name: str) -> str:
+    """Nur ein einfacher Programmname (``Name.exe``), keine Pfade oder Platzhalter, nie ein Prozess der Sperrliste."""
+    if not PROZESSNAME.fullmatch(name) or any(z in name for z in "*?/\\:"):
+        raise KonfigFehler(f"[prompter] prozessname {name!r}: nur ein Programmname wie „Camera Hub.exe“.")
+    if name.lower() in NIE_BEENDEN:
+        raise KonfigFehler(f"[prompter] prozessname {name!r} wird nie beendet (Systemprozess oder Aufnahmeprogramm).")
+    return name
+
+
+def tasklist_namen(csv_text: str) -> list[str]:
+    """Erste Spalte von ``tasklist /FO CSV /NH`` (exakte Programmnamen)."""
+    return [zeile[0] for zeile in csv.reader(io.StringIO(csv_text)) if zeile]
 
 
 class CameraHub:
@@ -158,16 +185,16 @@ class CameraHub:
     def __init__(self, prozessname: str, programm: Path | None) -> None:
         if os.name != "nt":
             raise NurWindows("prompter einspielen läuft vorerst nur unter Windows (Camera Hub).")
-        self.prozessname, self.programm = prozessname, programm
+        self.prozessname, self.programm = prozessname_pruefen(prozessname), programm
 
     @staticmethod
     def _system32(werkzeug: str) -> str:
         return str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32" / werkzeug)
 
     def laeuft(self) -> bool:
-        r = subprocess.run([self._system32("tasklist.exe"), "/FI", f"IMAGENAME eq {self.prozessname}", "/NH"],
-                           capture_output=True, text=True, errors="replace")
-        return self.prozessname.lower() in (r.stdout or "").lower()
+        r = subprocess.run([self._system32("tasklist.exe"), "/FI", f"IMAGENAME eq {self.prozessname}", "/FO", "CSV",
+                            "/NH"], capture_output=True, text=True, errors="replace")
+        return any(n.lower() == self.prozessname.lower() for n in tasklist_namen(r.stdout or ""))
 
     def beenden(self) -> tuple[bool, str]:
         """Hart beenden und nachsehen, ob der Prozess wirklich weg ist (der Rückgabewert von taskkill allein taugt
@@ -195,12 +222,24 @@ def bestand(texts: Path) -> list[tuple[Path, dict]]:
     raus = []
     for f in sorted(texts.glob("*.json")):
         try:
-            d = json.loads(f.read_text(encoding="utf-8"))
+            d = json.loads(f.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         if isinstance(d, dict):
             raus.append((f, d))
     return raus
+
+
+def einstellungen_laden(datei: Path) -> dict:
+    if not datei.is_file():
+        raise StudioFehler(f"{datei} fehlt: ist [prompter] datenordner richtig?")
+    try:
+        einstellungen = json.loads(datei.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        raise StudioFehler(f"{datei} ist nicht lesbar ({type(e).__name__}). Nichts verändert.") from e
+    if not isinstance(einstellungen, dict):
+        raise StudioFehler(f"{datei} ist kein JSON-Objekt. Nichts verändert.")
+    return einstellungen
 
 
 def atomar(pfad: Path, text: str) -> None:
@@ -225,27 +264,37 @@ def sichern(datenordner: Path) -> Path:
     return ziel
 
 
+def planen(projekt: Projekt, vorher: list[tuple[Path, dict]]) -> tuple[dict, list[tuple[Path, dict]]]:
+    """Bestand nach Name und die veralteten eigenen Einträge. Bricht ab bei doppelten Namen im Bestand."""
+    namen = Counter(d.get("friendlyName") for _, d in vorher)
+    gewollt = {p.name for p in projekt.posten}
+    doppelt = sorted(n for n, c in namen.items() if c > 1 and n in gewollt)
+    if doppelt:
+        raise StudioFehler(f"Im Prompter gibt es mehrere Einträge namens {', '.join(doppelt)}: von Hand bereinigen. "
+                           "Nichts verändert.")
+    nach_name = {d.get("friendlyName"): (f, d) for f, d in vorher}
+    veraltet = [(f, d) for f, d in vorher if str(d.get("friendlyName") or "").startswith(projekt.praefix)
+                and d.get("friendlyName") not in gewollt]
+    return nach_name, veraltet
+
+
 def einspielen(projekt: Projekt, datenordner: Path, hub, probe: bool = False, nichts_loeschen: bool = False,
                neustart: bool = True) -> list[str]:
     """Schreibt die Posten in den Camera-Hub-Datenordner. ``hub`` hat ``laeuft``, ``beenden``, ``starten``."""
     texts, einstellungen_datei = datenordner / "Texts", datenordner / "AppSettings.json"
-    if not einstellungen_datei.is_file():
-        raise StudioFehler(f"{einstellungen_datei} fehlt: ist [prompter] datenordner richtig?")
     if projekt.fehler:
         raise StudioFehler("prompter.toml hat Fehler:\n  " + "\n  ".join(projekt.fehler))
-    vorher = bestand(texts)
-    nach_name = {d.get("friendlyName"): (f, d) for f, d in vorher}
-    gewollt = {p.name for p in projekt.posten}
-    veraltet = [(f, d) for f, d in vorher if projekt.praefix and str(d.get("friendlyName") or "").startswith(
-        projekt.praefix) and d.get("friendlyName") not in gewollt]
+    einstellungen_laden(einstellungen_datei)                  # vor dem Beenden: lesbar?
     zeilen = []
     if probe:
+        nach_name, veraltet = planen(projekt, bestand(texts))
         for p in projekt.posten:
             zustand = "aktualisiert" if p.name in nach_name else "neu"
             zeilen.append(f"  [{zustand:>12}] {p.name} ({len(p.sektionen)} Abschnitte)")
         was = "bleiben" if nichts_loeschen else "entfernt"
-        zeilen.append(f"Probe: {len(veraltet)} veraltete eigene Einträge würden {was};"
-                      " nichts verändert.")
+        for _, d in veraltet:
+            zeilen.append(f"  [{'veraltet':>12}] {d.get('friendlyName')} (würde {was})")
+        zeilen.append(f"Probe: {len(veraltet)} veraltete eigene Einträge würden {was}; nichts verändert.")
         return zeilen
 
     sicherung = sichern(datenordner)
@@ -255,8 +304,15 @@ def einspielen(projekt: Projekt, datenordner: Path, hub, probe: bool = False, ni
         raise StudioFehler("Camera Hub läuft weiter. Wer jetzt schreibt, dessen Arbeit rollt Camera Hub beim nächsten "
                            "Beenden zurück. Nichts verändert.")
     zeilen.append(f"Camera Hub {wie}")
-    belegt = {d.get("index") for _, d in vorher if isinstance(d.get("index"), int)}
-    naechster = (max(belegt) + 1) if belegt else 0
+    try:
+        nach_name, veraltet = planen(projekt, bestand(texts))   # erst nach dem Beenden: der echte Stand
+        einstellungen = einstellungen_laden(einstellungen_datei)
+    except StudioFehler:
+        if neustart:
+            hub.starten()                                    # noch nichts geschrieben: wieder starten ist sicher
+        raise
+    vorher_indizes = {d.get("index") for _, d in nach_name.values() if isinstance(d.get("index"), int)}
+    naechster = (max(vorher_indizes) + 1) if vorher_indizes else 0
     vergeben: set[int] = set()
     guids: list[str] = []
     entfernt: list[str] = []
@@ -269,8 +325,9 @@ def einspielen(projekt: Projekt, datenordner: Path, hub, probe: bool = False, ni
                 alter_pfad, alt = treffer
                 index = alt.get("index")
                 guid = str(alt.get("GUID") or "").upper()
-                if not guid and GUID_MUSTER.match(alter_pfad.stem):
-                    guid = alter_pfad.stem.upper()   # Camera Hub verlangt GUID == Dateiname
+                if not GUID_MUSTER.match(guid):
+                    # Camera Hub verlangt GUID == Dateiname; nie einen fremden Text als Dateinamen benutzen.
+                    guid = alter_pfad.stem.upper() if GUID_MUSTER.match(alter_pfad.stem) else ""
             if not guid:
                 guid = str(uuid.uuid4()).upper()
             if not isinstance(index, int) or index in vergeben:
@@ -283,10 +340,9 @@ def einspielen(projekt: Projekt, datenordner: Path, hub, probe: bool = False, ni
                                     indent=4, ensure_ascii=False))
             guids.append(guid)
         if veraltet and not nichts_loeschen:
-            for f, d in veraltet:
+            for f, _ in veraltet:
                 f.unlink(missing_ok=True)
-                entfernt.append(str(d.get("GUID") or f.stem).upper())
-        einstellungen = json.loads(einstellungen_datei.read_text(encoding="utf-8"))
+                entfernt.append(f.stem.upper())
         liste = einstellungen.get(LIBRARY_KEY)
         liste = liste if isinstance(liste, list) else []
         weg_gross = set(entfernt)
@@ -303,12 +359,12 @@ def einspielen(projekt: Projekt, datenordner: Path, hub, probe: bool = False, ni
             liste.extend(verwaist)
         einstellungen[LIBRARY_KEY] = liste
         atomar(einstellungen_datei, json.dumps(einstellungen, indent=2, ensure_ascii=False))
-    except Exception:
-        zeilen.append(f"! Abbruch mitten im Lauf. Der Vorzustand liegt vollständig in {sicherung}.")
-        raise
-    finally:
-        if neustart:
-            zeilen.append("Camera Hub neu gestartet" if hub.starten() else "! Camera Hub bitte von Hand starten")
+    except Exception as e:
+        # Halber Stand: NICHT neu starten (Camera Hub würde ihn übernehmen); zurückholen entscheidet der Mensch.
+        raise StudioFehler(f"Abbruch mitten im Schreiben ({type(e).__name__}: {e}). Camera Hub wurde nicht neu "
+                           f"gestartet. Vorzustand: Inhalt von {sicherung} nach {datenordner} kopieren.") from e
+    if neustart:
+        zeilen.append("Camera Hub neu gestartet" if hub.starten() else "! Camera Hub bitte von Hand starten")
     abschnitte = sum(len(p.sektionen) for p in projekt.posten)
     zeilen.append(f"{len(projekt.posten)} Texte im Prompter, {abschnitte} Abschnitte, "
                   f"{len(entfernt)} veraltete entfernt.")
@@ -319,7 +375,7 @@ def einspielen(projekt: Projekt, datenordner: Path, hub, probe: bool = False, ni
 
 PROMPTER_TOML_BEISPIEL = """\
 # prompter.toml (je Projekt) – welche Texte in den Prompter kommen
-praefix = "MUSTER "                       # optional: Einträge mit diesem Anfang gehören dem Projekt
+praefix = "MUSTER "                       # Pflicht (mind. 3 Zeichen): Einträge mit diesem Anfang gehören dem Projekt
 [[skript]]
 name = "MUSTER M01 · Wie ein Stromnetz atmet"
 datei = "F2_prompter.md"                  # relativ zu dieser Datei; Leerzeile = neuer Abschnitt
@@ -380,9 +436,8 @@ def ausfuehren_einspielen(args, konfig: Konfig) -> int:
         for zeile in einspielen(projekt, datenordner, hub=None, probe=True, nichts_loeschen=args.nichts_loeschen):
             print(zeile)
         return 0
-    programm = konfig.wert("prompter", "programm", "")
-    hub = CameraHub(str(konfig.wert("prompter", "prozessname", "Camera Hub.exe")),
-                    Path(programm) if programm else None)
+    programm = konfig.text("prompter", "programm", "")
+    hub = CameraHub(konfig.text("prompter", "prozessname", "Camera Hub.exe"), Path(programm) if programm else None)
     if not args.ohne_obs:
         obs_frei(konfig)
     for zeile in einspielen(projekt, datenordner, hub, nichts_loeschen=args.nichts_loeschen,

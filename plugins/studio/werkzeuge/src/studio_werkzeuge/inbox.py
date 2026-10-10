@@ -2,9 +2,9 @@
 """Lose Rohdateien der Inbox nach Takes ordnen (`studio inbox-ordnen`): A und B desselben Takes in EINEN Ordner.
 
 Die Rohdateien kommen nach ``<ziel>/<JJJJ-MM-TT hh-mm-ss>/Roh/``, dieselbe Form wie beim Wächter; ein vorhandener
-Take-Ordner (auch „… PRUEFEN“) wird benutzt. Nur Umbenennen auf derselben Platte. Dateien, die jünger als
+Take-Ordner (auch „… PRUEFEN“) wird benutzt. Nur Umbenennen, nie überschreiben. Dateien, die jünger als
 ``--min-alter`` sind, bleiben liegen (frische Takes sortiert der Wächter selbst ein). Jeder Lauf schreibt ein Protokoll
-``<inbox>/_geordnet-<zeit>.tsv``; ``--zurueck <tsv>`` dreht ihn zurück.
+``<inbox>/_geordnet-<zeit>.tsv``; ``--zurueck <tsv>`` dreht ihn zurück, aber nur für Pfade in Inbox und Ziel.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from pathlib import Path
 from studio_werkzeuge.fehler import StudioFehler
 from studio_werkzeuge.konfig import Konfig
 from studio_werkzeuge.paar import MAX_STEMPEL_ABSTAND_S, Benennung, abstand_s, benennung_aus, ordner_name, take_ordner
+from studio_werkzeuge.sicher import umbenennen
 
 MIN_ALTER_S = 3600.0
 
@@ -43,21 +44,38 @@ def zielordner(stempel: str, ziel: Path) -> Path:
     return take_ordner(ziel, ordner_name(stempel)) / "Roh"
 
 
-def zurueckdrehen(protokoll: Path) -> tuple[int, int, list[str]]:
-    """Ein Protokoll rückwärts abarbeiten; leer gewordene Ordner verschwinden. (zurück, gesamt, Fehler)."""
-    zeilen = [z.split("\t") for z in protokoll.read_text(encoding="utf-8").splitlines() if "\t" in z]
-    zurueck, fehler = 0, []
-    for alt, neu in reversed(zeilen):
+def _liegt_in(pfad: Path, basis: Path) -> bool:
+    try:
+        pfad.resolve().relative_to(basis.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def zurueckdrehen(protokoll: Path, inbox: Path, ziel: Path) -> tuple[int, int, list[str]]:
+    """Ein Protokoll rückwärts abarbeiten. Erlaubt ist nur: alter Ort direkt in der Inbox, neuer Ort in
+    ``<ziel>/<Take>/Roh/``. Nie überschreiben. Danach werden leer gewordene ``Roh/`` und Take-Ordner entfernt, nie
+    mehr. Rückgabe: (zurück, gesamt, Fehler)."""
+    zeilen = [z.split("\t") for z in protokoll.read_text(encoding="utf-8-sig").splitlines() if "\t" in z]
+    zurueck, fehler, geleert = 0, [], set()
+    for teile in reversed(zeilen):
+        if len(teile) != 2:
+            fehler.append(f"kaputte Zeile: {teile!r}")
+            continue
+        alt, neu = Path(teile[0]), Path(teile[1])
+        if alt.parent.resolve() != inbox.resolve() or neu.parent.name != "Roh" or not _liegt_in(neu, ziel):
+            fehler.append(f"{neu}: liegt nicht in Inbox/Ziel, wird nicht angefasst")
+            continue
         try:
-            Path(neu).rename(alt)
+            umbenennen(neu, alt)
             zurueck += 1
+            geleert.add(neu.parent)
         except OSError as e:
             fehler.append(f"{neu}: {e}")
-    grenzen = {Path(alt).parent for alt, _ in zeilen}   # nie über den alten Ort (die Inbox) hinaus aufräumen
-    for ordner in sorted({Path(neu).parent for _, neu in zeilen}, key=lambda p: len(p.parts), reverse=True):
-        while ordner not in grenzen and ordner.is_dir() and not any(ordner.iterdir()):
-            ordner.rmdir()
-            ordner = ordner.parent
+    for roh in geleert:
+        for ordner in (roh, roh.parent):
+            if ordner.is_dir() and ordner.resolve() != ziel.resolve() and not any(ordner.iterdir()):
+                ordner.rmdir()
     return zurueck, len(zeilen), fehler
 
 
@@ -73,14 +91,14 @@ def einrichten(unter) -> None:
 
 
 def ausfuehren(args, konfig: Konfig) -> int:
+    inbox = args.ordner or konfig.pfad_wert("pfade", "inbox")
+    ziel = args.ziel or konfig.pfad_wert("pfade", "ziel", inbox)
     if args.zurueck:
-        zurueck, gesamt, fehler = zurueckdrehen(args.zurueck)
+        zurueck, gesamt, fehler = zurueckdrehen(args.zurueck, inbox, ziel)
         print(f"{zurueck}/{gesamt} Dateien zurückgelegt.")
         for f in fehler:
             print(f"  nicht zurückgelegt: {f}")
         return 0 if not fehler else 1
-    inbox = args.ordner or konfig.pfad_wert("pfade", "inbox")
-    ziel = args.ziel or konfig.pfad_wert("pfade", "ziel", inbox)
     if not inbox.is_dir():
         raise StudioFehler(f"Inbox gibt es nicht: {inbox}")
     benennung = benennung_aus(konfig)
@@ -108,10 +126,10 @@ def ausfuehren(args, konfig: Konfig) -> int:
         print("Probe: nichts verschoben.")
         return 0
     protokoll = inbox / f"_geordnet-{datetime.now():%Y%m%d-%H%M%S}.tsv"
-    with protokoll.open("w", encoding="utf-8") as f:
+    with protokoll.open("x", encoding="utf-8") as f:
         for q, z in plan:
             z.parent.mkdir(parents=True, exist_ok=True)
-            q.rename(z)
+            umbenennen(q, z)
             f.write(f"{q}\t{z}\n")
             f.flush()
     nachher = sum(1 for _, z in plan if z.is_file())

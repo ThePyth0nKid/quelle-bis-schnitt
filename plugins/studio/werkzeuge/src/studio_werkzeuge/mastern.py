@@ -16,12 +16,13 @@ Voreinstellungen (alle einstellbar, ``[mastern]`` oder Optionen):
 from __future__ import annotations
 
 import json
-import os
+from datetime import datetime
 from pathlib import Path
 
 from studio_werkzeuge import medien
 from studio_werkzeuge.fehler import StudioFehler
 from studio_werkzeuge.konfig import Konfig
+from studio_werkzeuge.sicher import umbenennen
 
 ZIEL_LUFS = -14.0
 ZIEL_TRUE_PEAK = -1.5
@@ -53,7 +54,7 @@ def ist_video(ausgang: Path, hat_bild: bool) -> bool:
 
 
 def ffmpeg_befehl(eingang: Path, ausgang: Path, filter_ton: str, video: bool, crf: int, hoehe: int | None) -> list[str]:
-    befehl = ["ffmpeg", "-v", "error", "-y", "-i", str(eingang)]
+    befehl = [*medien.FFMPEG, "-v", "error", "-y", "-i", medien.arg(eingang)]
     if video:
         vf = [f"scale=-2:{hoehe}:flags=lanczos"] if hoehe else []
         vf.append("format=yuv420p")
@@ -67,7 +68,7 @@ def ffmpeg_befehl(eingang: Path, ausgang: Path, filter_ton: str, video: bool, cr
             raise StudioFehler(f"Endung {ausgang.suffix!r} unbekannt. Ton: {', '.join(AUDIO_CODECS)}; "
                                f"Video: {', '.join(sorted(VIDEO_ENDUNGEN))}.")
         befehl += ["-map", "0:a:0", "-vn", "-af", filter_ton, *codec, "-ar", "48000"]
-    return befehl + [str(ausgang)]
+    return befehl + [medien.arg(ausgang)]
 
 
 def verstaerkung_finden(eingang: Path, gain: float, ziel: float, ziel_tp: float, reserve: float,
@@ -109,14 +110,21 @@ def mastern(eingang: Path, ausgang: Path, ziel: float = ZIEL_LUFS, ziel_tp: floa
                               "Mischung prüfen: zu laute Klänge, O-Töne oder Spitzen? Nichts geschrieben.")
         return bericht
     gain, plan = verstaerkung_finden(eingang, gain, ziel, ziel_tp, reserve)
-    bericht.update(anhebung_db=gain, plan_messung=plan, kette=kette(gain, ziel_tp, reserve))
+    # Die Nachführung kann die Verstärkung erhöhen: Bedarf mit der endgültigen Verstärkung erneut prüfen.
+    bedarf = begrenzer_bedarf(vor, gain, ziel_tp)
+    bericht.update(anhebung_db=gain, begrenzer_db=bedarf, plan_messung=plan, kette=kette(gain, ziel_tp, reserve))
+    if bedarf > max_begrenzer:
+        bericht["abbruch"] = (f"Mit der nachgeführten Verstärkung {gain:+.2f} dB müsste der Begrenzer {bedarf:.1f} dB "
+                              f"greifen (erlaubt {max_begrenzer:.1f} dB). Mischung prüfen. Nichts geschrieben.")
+        return bericht
     if probe:
         bericht["probe"] = True
         bericht["ok"] = abs(plan["lufs"] - ziel) <= TOLERANZ_LU and plan["dbtp"] <= ziel_tp
         return bericht
 
     teil = ausgang.with_name(f"{ausgang.stem}.part{ausgang.suffix}")
-    teil.unlink(missing_ok=True)
+    if teil.exists() or teil.resolve() == eingang.resolve():
+        raise StudioFehler(f"{teil} gibt es schon (abgebrochener Lauf?). Prüfen und von Hand entfernen.")
     try:
         medien.lauf(ffmpeg_befehl(eingang, teil, kette(gain, ziel_tp, reserve), video, crf, hoehe), "Mastern")
         nach = medien.lautheit_messen(teil)
@@ -131,12 +139,16 @@ def mastern(eingang: Path, ausgang: Path, ziel: float = ZIEL_LUFS, ziel_tp: floa
         if fehler:
             bericht["abbruch"] = "; ".join(fehler) + ". Nichts an den Zielnamen gelegt."
             return bericht
-        os.replace(teil, ausgang)
+        umbenennen(teil, ausgang)                 # nie überschreiben, auch nicht in letzter Sekunde
     finally:
         teil.unlink(missing_ok=True)
     bericht["ok"] = True
-    ausgang.with_name(ausgang.name + ".json").write_text(json.dumps(bericht, ensure_ascii=False, indent=1),
-                                                        encoding="utf-8")
+    messung = ausgang.with_name(ausgang.name + ".json")
+    if messung.exists():
+        messung = ausgang.with_name(f"{ausgang.name}.{datetime.now():%Y%m%d-%H%M%S}.json")
+    bericht["messung"] = str(messung)
+    with open(messung, "x", encoding="utf-8") as f:
+        f.write(json.dumps(bericht, ensure_ascii=False, indent=1))
     return bericht
 
 
@@ -156,12 +168,12 @@ def einrichten(unter) -> None:
 
 
 def ausfuehren(args, konfig: Konfig) -> int:
-    ziel = args.ziel_lufs if args.ziel_lufs is not None else float(konfig.wert("mastern", "ziel_lufs", ZIEL_LUFS))
-    tp = args.ziel_true_peak if args.ziel_true_peak is not None else float(
-        konfig.wert("mastern", "ziel_true_peak", ZIEL_TRUE_PEAK))
-    grenze = args.max_begrenzer_db if args.max_begrenzer_db is not None else float(
-        konfig.wert("mastern", "max_begrenzer_db", MAX_BEGRENZER_DB))
-    crf = args.crf if args.crf is not None else int(konfig.wert("mastern", "crf", CRF))
+    ziel = args.ziel_lufs if args.ziel_lufs is not None else konfig.zahl("mastern", "ziel_lufs", ZIEL_LUFS)
+    tp = args.ziel_true_peak if args.ziel_true_peak is not None else konfig.zahl("mastern", "ziel_true_peak",
+                                                                                  ZIEL_TRUE_PEAK)
+    grenze = args.max_begrenzer_db if args.max_begrenzer_db is not None else konfig.zahl(
+        "mastern", "max_begrenzer_db", MAX_BEGRENZER_DB)
+    crf = args.crf if args.crf is not None else konfig.ganzzahl("mastern", "crf", CRF)
     b = mastern(args.eingang, args.ausgang, ziel, tp, grenze, crf, args.hoehe, args.probe)
     v = b["vorher"]
     print(f"Vorher: {v['lufs']:.1f} LUFS, LRA {v['lra']:.1f} LU, True Peak {v['dbtp']:.1f} dBTP")
@@ -178,5 +190,5 @@ def ausfuehren(args, konfig: Konfig) -> int:
     if b.get("probe"):
         print("Probe: nichts geschrieben.")
         return 0 if b["ok"] else 1
-    print(f"Fertig: {b['ausgang']} (Messwerte in {b['ausgang']}.json)")
+    print(f"Fertig: {b['ausgang']} (Messwerte in {b['messung']})")
     return 0

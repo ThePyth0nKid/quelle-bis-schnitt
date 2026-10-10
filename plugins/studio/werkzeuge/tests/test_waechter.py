@@ -2,6 +2,7 @@
 """Wächter: reine Teile (übernommen und angepasst), BMP-Leser, `--einmal --probe`, Ablauf mit OBS-Attrappen."""
 from __future__ import annotations
 
+import os
 import struct
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from studio_werkzeuge import waechter as w
 from studio_werkzeuge.cli import main
 
@@ -89,22 +91,48 @@ def test_offene_takes(tmp_path):
     assert w.offene_takes(tmp_path / "leer", tmp_path / "leer") == []
 
 
-def test_neu_bauen_lesen_leert_die_datei(tmp_path):
+def test_neu_bauen_erst_nach_dem_bau_ausgetragen(tmp_path):
     datei = tmp_path / "neu_bauen.txt"
-    assert w.neu_bauen_lesen(datei) == []
+    assert w.neu_bauen_lesen(datei) == ([], [])
     datei.write_text("# Kommentar\n20260314-095800\n20260314-091201  # nochmal\nkaputt\n20260314-095800\n",
                      encoding="utf-8")
-    assert w.neu_bauen_lesen(datei) == ["20260314-091201", "20260314-095800"]
-    assert datei.read_text(encoding="utf-8") == ""
+    stempel, ungueltig = w.neu_bauen_lesen(datei)
+    assert stempel == ["20260314-091201", "20260314-095800"] and ungueltig == ["kaputt"]
+    assert "kaputt" in datei.read_text(encoding="utf-8")                     # Lesen ändert nichts
+    w.neu_bauen_erledigt(datei, {"20260314-095800"})
+    rest = datei.read_text(encoding="utf-8")
+    assert "20260314-095800" not in rest and "20260314-091201  # nochmal" in rest and "# Kommentar" in rest
 
 
-def test_arbeitsordner_aufraeumen_nur_eigener_take(tmp_path):
-    eigener, fremder = tmp_path / "~in Arbeit 2026-03-14 08-57-27 ab12", tmp_path / "~in Arbeit 2026-03-14 08-59-42 cd"
-    for p in (eigener, fremder):
-        p.mkdir()
-    assert w.arbeitsordner_aufraeumen(tmp_path, "20260314-085727") == [eigener] and fremder.is_dir()
-    (tmp_path / "2026-03-14 08-59-42").mkdir()
-    assert w.arbeitsordner_aufraeumen(tmp_path) == [fremder] and (tmp_path / "2026-03-14 08-59-42").is_dir()
+def _arbeitsordner(pfad: Path, pid: int | None) -> Path:
+    pfad.mkdir()
+    if pid is not None:
+        (pfad / "pid.txt").write_text(str(pid), encoding="ascii")
+    return pfad
+
+
+def test_arbeitsordner_aufraeumen_nur_tote_oder_alte(tmp_path):
+    tot = subprocess.Popen([sys.executable, "-c", "pass"])
+    tot.wait()
+    eigener = _arbeitsordner(tmp_path / "~in Arbeit 2026-03-14 08-57-27 ab12", tot.pid)
+    lebend = _arbeitsordner(tmp_path / "~in Arbeit 2026-03-14 08-59-42 cd", os.getpid())
+    ohne_pid = _arbeitsordner(tmp_path / "~in Arbeit 2026-03-14 09-00-00 ef", None)
+    fehler = _arbeitsordner(tmp_path / "~Fehler 2026-03-14 09-01-00 gh", tot.pid)
+    assert w.arbeitsordner_aufraeumen(tmp_path, "20260314-085727") == [eigener]      # nur der Take, Bau tot
+    assert w.arbeitsordner_aufraeumen(tmp_path) == []                                 # lebt oder jung: bleibt
+    assert lebend.is_dir() and ohne_pid.is_dir() and fehler.is_dir()                  # ~Fehler nie
+    assert sorted(w.arbeitsordner_aufraeumen(tmp_path, max_alter_s=-1)) == sorted([lebend, ohne_pid])   # zu alt
+
+
+def test_arbeitsordner_aufraeumen_ueberspringt_verknuepfungen(tmp_path):
+    echt = tmp_path / "echt"
+    echt.mkdir()
+    (echt / "wichtig.mp4").write_bytes(b"x")
+    try:
+        (tmp_path / "~in Arbeit 2026-03-14 08-57-27 x").symlink_to(echt, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symlinks hier nicht erlaubt")
+    assert w.arbeitsordner_aufraeumen(tmp_path, max_alter_s=-1) == [] and (echt / "wichtig.mp4").is_file()
 
 
 def test_einmal_probe_ohne_obs(tmp_path, capsys):
@@ -115,10 +143,44 @@ def test_einmal_probe_ohne_obs(tmp_path, capsys):
     k = tmp_path / "studio.toml"
     k.write_text(f'[pfade]\ninbox = "{inbox.as_posix()}"\n', encoding="utf-8")
     assert main(["--konfig", str(k), "waechter", "--einmal", "--probe"]) == 0
+    (inbox / "synchron").mkdir()
+    (inbox / "synchron" / "neu_bauen.txt").write_text("kaputt\n", encoding="utf-8")
+    assert main(["--konfig", str(k), "waechter", "--einmal", "--probe"]) == 2      # ungültige Zeile = Fehler
     aus = capsys.readouterr().out
     assert "Take 20260314-085727: würde einsortiert" in aus and "Take 20260314-091500: nicht nachgeholt" in aus
     assert sorted(p.name for p in inbox.iterdir()) == ["cam-A-20260314-085727.mp4", "cam-A-20260314-091500.mp4",
-                                                       "cam-B-20260314-085727.mp4"]   # Probe: nichts bewegt
+                                                       "cam-B-20260314-085727.mp4", "synchron"]   # nichts bewegt
+
+
+def test_einmal_rc_rot_und_fehler(tmp_path, hilfe, monkeypatch):
+    """Exit 1 nur für einen roten Take, Exit 2 für einen Fehler; neu_bauen.txt erst nach dem Bau bereinigt."""
+    inbox = tmp_path / "inbox"
+    (inbox / "synchron").mkdir(parents=True)
+    for n in ("cam-A-20260314-085727.mp4", "cam-B-20260314-085727.mp4"):
+        (inbox / n).write_bytes(b"x")
+    (inbox / "synchron" / "neu_bauen.txt").write_text("20260314-085727\n", encoding="utf-8")
+    k = hilfe.konfig_aus(tmp_path, f'[pfade]\ninbox = "{inbox.as_posix()}"\n')
+    monkeypatch.setattr(w, "synchronisieren", lambda *a, **kw: {"ok": False, "ordner": "x"})
+    zeilen, rc = w.einmal(k)
+    assert rc == 1 and "ROT" in zeilen[-1]
+    assert "20260314-085727" not in (inbox / "synchron" / "neu_bauen.txt").read_text(encoding="utf-8")
+
+    def scheitert(*a, **kw):
+        raise w.StudioFehler("kaputt")
+
+    for n in ("cam-A-20260314-091500.mp4", "cam-B-20260314-091500.mp4"):
+        (inbox / n).write_bytes(b"x")
+    monkeypatch.setattr(w, "synchronisieren", scheitert)
+    zeilen, rc = w.einmal(k)
+    assert rc == 2 and "Paar nicht gebaut" in zeilen[-1]
+
+
+def test_bericht_lesen_nie_einen_alten(tmp_path):
+    datei = tmp_path / "synchron" / "2026-03-14 08-57-27.json"
+    datei.parent.mkdir()
+    datei.write_text('{"ok": true}', encoding="utf-8")
+    assert w.bericht_lesen(tmp_path, "20260314-085727") == {"ok": True}
+    assert w.bericht_lesen(tmp_path, "20260314-085727", nicht_vor=time.time() + 60) is None
 
 
 class FakeReq:
@@ -195,9 +257,42 @@ def test_bau_bricht_ab_wenn_eine_aufnahme_beginnt(tmp_path, hilfe, monkeypatch):
     assert (wa.ziel / "synchron" / "waechter-20260314-085727.log").is_file()
 
 
-def test_einzige_instanz(tmp_path):
-    erste = w.einzige_instanz(tmp_path / "w.lock")
-    assert erste is not None
-    assert w.einzige_instanz(tmp_path / "w.lock") is None
-    erste.close()
-    assert Path(tmp_path / "w.lock").exists()
+def test_waechter_sperre_vor_dem_protokoll(tmp_path, hilfe, capsys):
+    """Läuft schon ein Wächter, endet ein zweiter, ohne ein Protokoll anzulegen."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    k = tmp_path / "studio.toml"
+    k.write_text(f'[pfade]\ninbox = "{inbox.as_posix()}"\n', encoding="utf-8")
+    with w.waechter_sperre(inbox):
+        assert main(["--konfig", str(k), "waechter"]) == 0
+    assert "läuft schon" in capsys.readouterr().out and not (inbox / "synchron" / "waechter.log").exists()
+
+
+def test_abriss_waehrend_aufnahme_haelt_zustand_und_holt_nach(tmp_path, hilfe, monkeypatch):
+    wa = _waechter(tmp_path, hilfe, FakeReq(aufnahme=True))
+    nachgeholt: list[int] = []
+    monkeypatch.setattr(wa, "nachholen", lambda: nachgeholt.append(1))
+    wa.verbinden()
+    assert wa.nach_verbinden() is True                                       # erstes Verbinden: nachholen
+    wa.verbindung_verloren()
+    assert wa.nimmt_auf.is_set()                                             # nicht still gelöscht
+    wa.req_fabrik = lambda: FakeReq(aufnahme=False)
+    wa.verbinden()
+    assert not wa.nimmt_auf.is_set() and wa.nach_verbinden() is True        # Abriss in Aufnahme: nochmal nachholen
+    wa.verbindung_verloren()
+    wa.verbinden()
+    assert wa.nach_verbinden() is False                                      # Abriss ohne Aufnahme: nicht nötig
+    time.sleep(0.2)
+    assert len(nachgeholt) == 2
+
+
+def test_melden_ohne_neuen_bericht_ist_fehler(tmp_path, hilfe, monkeypatch):
+    wa = _waechter(tmp_path, hilfe, FakeReq())
+    alt = wa.ziel / "synchron" / "2026-03-14 08-57-27.json"
+    alt.parent.mkdir(parents=True)
+    alt.write_text('{"ok": true, "luecke_bilder": 4, "quelle": "bild"}', encoding="utf-8")
+    wa.bau_start["20260314-085727"] = time.time() + 60                     # Bericht ist älter als der Bau
+    gemeldet: list[tuple[str, str]] = []
+    monkeypatch.setattr(wa, "melde", lambda titel, text: gemeldet.append((titel, text)))
+    wa.melden("20260314-085727", 0)
+    assert gemeldet[0][0].endswith("Paar nicht gebaut") and "ohne neuen Bericht" in gemeldet[0][1]

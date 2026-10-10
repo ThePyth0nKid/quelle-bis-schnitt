@@ -134,20 +134,54 @@ def test_take_einsortieren_und_roh(tmp_path):
     assert ps.paar_finden(inbox, STEMPEL, inbox)[:2] == (aus["A"], aus["B"])
 
 
-def test_roh_entsorgen_meldet_was_nicht_geht(tmp_path):
+def test_papierkorb_verschiebt_nur_und_meldet_was_nicht_geht(tmp_path):
     a = tmp_path / "cam-A.mp4"
     a.write_bytes(b"a")
-    hinweise = ps.roh_entsorgen((a, tmp_path / "fehlt.mp4"), lambda p: p.unlink())
-    assert len(hinweise) == 1 and "fehlt.mp4" in hinweise[0] and not a.exists()
+    korb = ps.papierkorb_ordner(tmp_path, NAME)
+    hinweise = ps.in_den_papierkorb((a, tmp_path / "fehlt.mp4"), korb)
+    assert len(hinweise) == 1 and "fehlt.mp4" in hinweise[0]
+    assert (korb / "cam-A.mp4").read_bytes() == b"a" and not a.exists()      # verschoben, nie gelöscht
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="außerhalb von Windows")
-def test_papierkorb_nur_unter_windows(tmp_path):
-    a = tmp_path / "x.mp4"
-    a.write_bytes(b"a")
-    with pytest.raises(OSError, match="nur unter Windows"):
-        ps.papierkorb(a)
-    assert a.exists()                                                         # nie endgültig löschen
+def test_ablegen_sichert_alte_fassung(tmp_path):
+    arbeit, ordner = tmp_path / "arbeit", tmp_path / NAME
+    _dateien(arbeit, f"{NAME} Cam A.mp4", f"{NAME} Cam B.mp4")
+    ordner.mkdir()
+    (ordner / f"{NAME} Cam A.mp4").write_bytes(b"alt")
+    hinweise = ps.ablegen({"A": arbeit / f"{NAME} Cam A.mp4", "B": arbeit / f"{NAME} Cam B.mp4"}, ordner)
+    alt = next(ordner.glob("Alt-*"))
+    assert (alt / f"{NAME} Cam A.mp4").read_bytes() == b"alt" and "gesichert" in hinweise[0]
+    assert (ordner / f"{NAME} Cam A.mp4").read_bytes() == b"x" and (ordner / f"{NAME} Cam B.mp4").is_file()
+
+
+def test_ablegen_rollt_bei_fehler_zurueck(tmp_path, monkeypatch):
+    arbeit, ordner = tmp_path / "arbeit", tmp_path / NAME
+    _dateien(arbeit, f"{NAME} Cam A.mp4", f"{NAME} Cam B.mp4")
+    ordner.mkdir()
+    (ordner / f"{NAME} Cam A.mp4").write_bytes(b"alt")
+    echt = ps.umbenennen
+
+    def b_klemmt(quelle, ziel):
+        if quelle.name.endswith("Cam B.mp4") and ziel.parent == ordner:
+            raise PermissionError("Datei geöffnet")
+        echt(quelle, ziel)
+
+    monkeypatch.setattr(ps, "umbenennen", b_klemmt)
+    with pytest.raises(StudioFehler, match="geöffnet"):
+        ps.ablegen({"A": arbeit / f"{NAME} Cam A.mp4", "B": arbeit / f"{NAME} Cam B.mp4"}, ordner, pause_s=0.0)
+    assert (ordner / f"{NAME} Cam A.mp4").read_bytes() == b"alt"             # alte Fassung wieder an ihrem Platz
+    assert (arbeit / f"{NAME} Cam A.mp4").read_bytes() == b"x"               # neue zurück im Arbeitsordner
+    assert not list(ordner.glob("Alt-*")) and not (ordner / f"{NAME} Cam B.mp4").exists()
+
+
+def test_fps_ausdruck_exakt():
+    from fractions import Fraction
+    assert ps.fps_ausdruck(25.0) == "25" and ps.fps_ausdruck(Fraction(30000, 1001)) == "(30000/1001)"
+    assert ps.fps_ausdruck(30000 / 1001) == "(30000/1001)"
+    cmd = ps.befehl_neu(Path("b.mp4"), Path("t.m4a"), Plan("A", 0, 300, 0), Fraction(30000, 1001), Path("z.mp4"),
+                        "libx264", 18)
+    assert cmd[cmd.index("-vf") + 1].endswith("setpts=N/(30000/1001)/TB") and "-nostdin" in cmd
+    assert all(Path(cmd[i + 1]).is_absolute() for i, x in enumerate(cmd) if x == "-i")
 
 
 def test_bewegung_lesen_haengt_nicht_an_vollem_stderr():
@@ -235,6 +269,7 @@ def test_ende_zu_ende_zwei_videos_und_rohdateien_behalten(tmp_path):
     aus = ps.take_einsortieren(a, b, inbox, STEMPEL)
     bericht = ps.synchronisieren(aus["A"], aus["B"], inbox, STEMPEL, ps.Einstellungen(cq=14))
     assert (bericht["luecke_bilder"], bericht["quelle"]) == (4, "bild") and bericht["ok"], bericht["warnungen"]
+    assert not list(inbox.glob("~in Arbeit*")) and not list(inbox.glob("~Fehler*"))
     p = bericht["pruefung"]
     assert p["bilder"]["A"] == p["bilder"]["B"] == 340 and p["ton_bytegleich"]
     assert bericht["plan"] == {"frueh": "A", "vorne": 4, "bilder": 340, "auffuellen": 2}
@@ -252,10 +287,37 @@ def test_papierkorb_modus_nach_gruenem_bau(tmp_path):
     inbox.mkdir()
     a, b = _paar(inbox)
     aus = ps.take_einsortieren(a, b, inbox, STEMPEL)
-    weg: list[Path] = []
-    bericht = ps.synchronisieren(aus["A"], aus["B"], inbox, STEMPEL, ps.Einstellungen(rohdateien="papierkorb"),
-                                 entsorgen=lambda q: (weg.append(q), q.unlink()))
-    assert bericht["ok"] and weg == [aus["A"], aus["B"]] and not (inbox / NAME / "Roh").exists()
+    bericht = ps.synchronisieren(aus["A"], aus["B"], inbox, STEMPEL, ps.Einstellungen(rohdateien="papierkorb"))
+    korb = inbox / ps.PAPIERKORB / NAME
+    assert bericht["ok"] and bericht["ausgaben"]["papierkorb"] == str(korb)
+    assert sorted(q.name for q in korb.iterdir()) == [a.name, b.name] and not (inbox / NAME / "Roh").exists()
+
+
+@braucht_ffmpeg
+def test_zweiter_bau_sichert_die_erste_fassung(tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    a, b = _paar(inbox)
+    ps.synchronisieren(a, b, inbox, STEMPEL, ps.Einstellungen(cq=14), roh_lassen=True)
+    bericht = ps.synchronisieren(a, b, inbox, STEMPEL, ps.Einstellungen(cq=14), roh_lassen=True)
+    assert bericht["ok"] and any("gesichert" in h for h in bericht["hinweise"])
+    assert len(list((inbox / NAME).glob("Alt-*/*.mp4"))) == 2
+    assert not list(inbox.glob("~in Arbeit*"))
+
+
+@braucht_ffmpeg
+def test_d0_bleibt_leer_wenn_die_zerlegung_scheitert(tmp_path, monkeypatch):
+    """Scheitert die Ton-Messung nach dem ersten Versatz, darf ein halber Wert die Tonspur nicht verschieben."""
+    def scheitert(*_a, **_kw):
+        raise ps.ZuKurzeUeberlappung("künstlich")
+
+    monkeypatch.setattr(ps, "versatz_zerlegen", scheitert)
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    a, b = _paar(inbox)
+    bericht = ps.synchronisieren(a, b, tmp_path / "ziel", STEMPEL, ps.Einstellungen(cq=14), roh_lassen=True)
+    assert "fehler" in bericht["ton"] and bericht["ton"]["quelle"] == "A"
+    assert not any(h.startswith("Ton aus Kamera") for h in bericht["hinweise"])
 
 
 @braucht_ffmpeg
@@ -368,3 +430,7 @@ def test_cli_paar_probe_mit_konfiguration(tmp_path, hilfe, capsys):
     aus = capsys.readouterr().out
     assert "Lücke: 4 Bilder nach BILD" in aus and "Probe: nichts geschrieben." in aus
     assert sorted(q.name for q in inbox.iterdir()) == [f"cam-A-{STEMPEL}.mp4", f"cam-B-{STEMPEL}.mp4"]
+    from studio_werkzeuge.sicher import Sperre
+    with Sperre(inbox / "synchron" / "bau.lock"):                           # ein anderer Bau läuft
+        assert main(["--konfig", str(k), "paar"]) == 2
+    assert "Sperre" in capsys.readouterr().err

@@ -8,7 +8,7 @@ import os
 import pytest
 from studio_werkzeuge import prompter as pr
 from studio_werkzeuge.cli import main
-from studio_werkzeuge.fehler import NurWindows, StudioFehler
+from studio_werkzeuge.fehler import KonfigFehler, NurWindows, StudioFehler
 
 # Sätze
 
@@ -16,6 +16,15 @@ def test_saetze_ordnungszahl_und_kuerzel():
     assert pr.saetze("Am 3. Oktober war es so. Das ist z. B. gut! Wirklich?") == [
         "Am 3. Oktober war es so.", "Das ist z. B. gut!", "Wirklich?"]
     assert pr.saetze("Er sagte: „Nein.“ Dann ging er.") == ["Er sagte: „Nein.“", "Dann ging er."]
+
+
+def test_kuerzel_nur_mit_wortgrenze():
+    assert pr.saetze("Wir fliegen nach Mallorca. Dort ist es warm.") == ["Wir fliegen nach Mallorca.",
+                                                                         "Dort ist es warm."]
+    assert pr.saetze("Das kostet ca. 5 Euro. Gut.") == ["Das kostet ca. 5 Euro.", "Gut."]
+    assert pr.saetze("Gut. Z. B. Erika kommt. Max nicht.") == ["Gut.", "Z. B. Erika kommt.", "Max nicht."]
+    assert pr.saetze("Es gibt Nr. 5 und Dr. Mustermann. Ende.") == ["Es gibt Nr. 5 und Dr. Mustermann.", "Ende."]
+    assert pr.saetze("Das ist z.B. Erika. Fertig.") == ["Das ist z.B. Erika.", "Fertig."]
 
 
 def test_satzweise_marken_tragen_weiter_und_regie_bleibt():
@@ -134,11 +143,78 @@ def test_hub_geht_nicht_weg_dann_nichts_geschrieben(tmp_path):
     assert list((daten / "Texts").glob("*.json")) == []
 
 
+def test_probe_nennt_die_zu_loeschenden_eintraege(tmp_path):
+    daten, hub = _hub_ordner(tmp_path), FakeHub()
+    pr.einspielen(_projekt(tmp_path), daten, hub)
+    zeilen = pr.einspielen(_projekt(tmp_path, ("MUSTER M01 · Wie ein Stromnetz atmet",)), daten, None, probe=True)
+    assert any("[    veraltet] MUSTER M02 · Was ein Zähler weiß" in z for z in zeilen)
+
+
+def test_unlesbare_einstellungen_brechen_vor_dem_beenden_ab(tmp_path):
+    daten, hub = _hub_ordner(tmp_path), FakeHub()
+    (daten / "AppSettings.json").write_text("{kaputt", encoding="utf-8")
+    with pytest.raises(StudioFehler, match="nicht lesbar"):
+        pr.einspielen(_projekt(tmp_path), daten, hub)
+    assert hub.beendet == 0 and not list(daten.glob("Sicherung-*"))
+
+
+def test_teilschreiben_startet_nicht_neu(tmp_path, monkeypatch):
+    daten, hub = _hub_ordner(tmp_path), FakeHub()
+    aufrufe: list[int] = []
+    echt = pr.atomar
+
+    def bricht_beim_zweiten(pfad, text):
+        aufrufe.append(1)
+        if len(aufrufe) == 2:
+            raise OSError("Platte voll")
+        echt(pfad, text)
+
+    monkeypatch.setattr(pr, "atomar", bricht_beim_zweiten)
+    with pytest.raises(StudioFehler, match="nicht neu gestartet"):
+        pr.einspielen(_projekt(tmp_path), daten, hub)
+    assert hub.beendet == 1 and hub.gestartet == 0
+
+
+def test_doppelte_namen_im_bestand_brechen_ab(tmp_path):
+    daten, hub = _hub_ordner(tmp_path), FakeHub()
+    for guid in ("AAAAAAAA-0000-0000-0000-000000000001", "AAAAAAAA-0000-0000-0000-000000000002"):
+        (daten / "Texts" / f"{guid}.json").write_text(json.dumps(
+            {"GUID": guid, "chapters": ["x"], "friendlyName": "MUSTER M01 · Wie ein Stromnetz atmet", "index": 1}),
+            encoding="utf-8")
+    with pytest.raises(StudioFehler, match="mehrere Einträge"):
+        pr.einspielen(_projekt(tmp_path), daten, hub)
+    assert hub.gestartet == 1                                                 # noch nichts geschrieben: wieder an
+
+
+def test_fremde_guid_wird_nie_dateiname(tmp_path):
+    daten, hub = _hub_ordner(tmp_path), FakeHub()
+    pr.einspielen(_projekt(tmp_path), daten, hub)
+    texte, _ = _stand(daten)
+    guid = texte["MUSTER M01 · Wie ein Stromnetz atmet"][0]
+    datei = daten / "Texts" / f"{guid}.json"
+    j = json.loads(datei.read_text(encoding="utf-8"))
+    j["GUID"] = "../../boese"
+    datei.write_text(json.dumps(j), encoding="utf-8")
+    pr.einspielen(_projekt(tmp_path), daten, hub)
+    assert not (tmp_path / "boese.json").exists()
+    assert _stand(daten)[0]["MUSTER M01 · Wie ein Stromnetz atmet"][0] == guid
+
+
+def test_prozessname_und_tasklist():
+    assert pr.prozessname_pruefen("Camera Hub.exe") == "Camera Hub.exe"
+    for falsch in ("obs64.exe", "OBS64.EXE", "explorer.exe", "*.exe", "C:/x/y.exe", "Camera Hub", "a/b.exe"):
+        with pytest.raises(KonfigFehler):
+            pr.prozessname_pruefen(falsch)
+    csv_text = '"Camera Hub.exe","1234","Console","1","50.000 K"\n"Camera Hub Helper.exe","99","Console","1","1 K"\n'
+    assert pr.tasklist_namen(csv_text) == ["Camera Hub.exe", "Camera Hub Helper.exe"]
+
+
 def test_projektfehler(tmp_path):
     (tmp_path / "prompter.toml").write_text('praefix = "X "\n[[skript]]\nname = "Y 1"\ndatei = "fehlt.md"\n'
                                             '[[skript]]\nname = "Z"\n', encoding="utf-8")
     p = pr.projekt_laden(tmp_path / "prompter.toml")
     assert any("fehlt" in f for f in p.fehler) and any("ohne name oder datei" in f for f in p.fehler)
+    assert any("kürzer als 3" in f for f in p.fehler)                          # praefix „X “ ist zu kurz
     with pytest.raises(StudioFehler, match="prompter.toml hat Fehler"):
         pr.einspielen(p, _hub_ordner(tmp_path), FakeHub())
 

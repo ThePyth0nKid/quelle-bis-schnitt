@@ -15,6 +15,7 @@ auf diesen Wortlaut. Gegenmittel: nie einen erwarteten Text übergeben; zum Gege
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from pathlib import Path
 
@@ -64,10 +65,30 @@ def fern_befehl(konfig: Konfig) -> list[str]:
     return befehl
 
 
+def zeitlimit_pruefen(zeitlimit_s: float) -> float:
+    if isinstance(zeitlimit_s, bool) or not isinstance(zeitlimit_s, (int, float)) or not math.isfinite(zeitlimit_s) \
+            or zeitlimit_s <= 0:
+        raise KonfigFehler(f"[transkript.fern] zeitlimit_s muss eine Zahl über 0 sein, ist {zeitlimit_s!r}.")
+    return float(zeitlimit_s)
+
+
+def _segment(s: object) -> dict:
+    if not isinstance(s, dict):
+        raise StudioFehler("Fern-Befehl: jedes Segment muss ein Objekt sein.")
+    try:
+        start, ende = float(s.get("start")), float(s.get("end"))
+    except (TypeError, ValueError) as e:
+        raise StudioFehler(f"Fern-Befehl: Segment ohne gültige Zeiten ({s.get('start')!r}, {s.get('end')!r}).") from e
+    woerter = s.get("woerter", [])
+    return {"start": start, "end": ende, "text": str(s.get("text", "")).strip(),
+            "woerter": woerter if isinstance(woerter, list) else []}
+
+
 def fern(datei: Path, befehl: list[str], zeitlimit_s: float = 3600.0) -> list[dict]:
-    """Ton als WAV über stdin an den Fern-Befehl, JSON zurück. Keine Shell, Zeitlimit."""
-    wav = medien.lauf(["ffmpeg", "-v", "error", "-i", str(datei), "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", "-"],
-                      f"Ton lesen ({datei.name})")
+    """Ton als WAV über stdin an den Fern-Befehl, JSON zurück. Keine Shell, Zeitlimit für beide Schritte."""
+    zeitlimit_s = zeitlimit_pruefen(zeitlimit_s)
+    wav = medien.lauf([*medien.FFMPEG, "-v", "error", "-i", medien.arg(datei), "-vn", "-ac", "1", "-ar", "16000",
+                       "-f", "wav", "-"], f"Ton lesen ({datei.name})", timeout=zeitlimit_s)
     try:
         r = subprocess.run(befehl, input=wav, capture_output=True, timeout=zeitlimit_s, **medien.OHNE_FENSTER)
     except FileNotFoundError as e:
@@ -83,8 +104,7 @@ def fern(datei: Path, befehl: list[str], zeitlimit_s: float = 3600.0) -> list[di
     segmente = daten.get("segmente") if isinstance(daten, dict) else daten
     if not isinstance(segmente, list):
         raise StudioFehler('Fern-Befehl: erwartet {"segmente": [...]}.')
-    return [{"start": float(s["start"]), "end": float(s["end"]), "text": str(s.get("text", "")).strip(),
-             "woerter": s.get("woerter", [])} for s in segmente]
+    return [_segment(s) for s in segmente]
 
 
 def zeit_srt(t: float) -> str:
@@ -117,17 +137,18 @@ def ausfuehren(args, konfig: Konfig) -> int:
         raise StudioFehler(f"Datei fehlt: {args.datei}")
     if args.ausgabe and args.ausgabe.exists():
         raise StudioFehler(f"{args.ausgabe} gibt es schon. Nie überschreiben: anderen Namen wählen.")
-    backend = str(konfig.wert("transkript", "backend", "lokal"))
+    backend = konfig.text("transkript", "backend", "lokal")
     if backend == "fern":
-        segmente = fern(args.datei, fern_befehl(konfig), float(konfig.wert("transkript.fern", "zeitlimit_s", 3600)))
+        segmente = fern(args.datei, fern_befehl(konfig), konfig.zahl("transkript.fern", "zeitlimit_s", 3600))
     elif backend == "lokal":
-        segmente = lokal(args.datei, args.modell or str(konfig.wert("transkript", "modell", MODELL)),
-                         args.sprache or str(konfig.wert("transkript", "sprache", SPRACHE)),
-                         args.geraet or str(konfig.wert("transkript", "geraet", "auto")))
+        segmente = lokal(args.datei, args.modell or konfig.text("transkript", "modell", MODELL),
+                         args.sprache or konfig.text("transkript", "sprache", SPRACHE),
+                         args.geraet or konfig.text("transkript", "geraet", "auto"))
     else:
         raise KonfigFehler(f"[transkript] backend muss lokal oder fern sein, ist {backend!r}.")
     if args.ausgabe:
-        args.ausgabe.write_text(als_text(segmente, args.ausgabe.suffix.lower()), encoding="utf-8")
+        with open(args.ausgabe, "x", encoding="utf-8") as f:     # nie überschreiben, auch nicht in letzter Sekunde
+            f.write(als_text(segmente, args.ausgabe.suffix.lower()))
         print(f"{len(segmente)} Abschnitte → {args.ausgabe}")
     else:
         print(als_text(segmente, ".txt"), end="")

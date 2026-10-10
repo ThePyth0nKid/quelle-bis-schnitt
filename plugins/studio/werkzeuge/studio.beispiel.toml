@@ -29,7 +29,8 @@ filter_b = "<Name des Source-Record-Filters an Quelle B>"
 encoder = "libx264"               # libx264 (überall) oder h264_nvenc (NVIDIA)
 cq = 18                           # Qualität der neu kodierten Kamera B (kleiner = besser)
 drehung_b = "keine"               # keine | links | rechts (Kamera B hochkant montiert)
-rohdateien = "behalten"           # behalten (nach <Take>/Roh/) | papierkorb (nur Windows, nach grünem Bau)
+rohdateien = "behalten"           # behalten (nach <Take>/Roh/) | papierkorb (nach grünem, nachgeprüftem Bau
+                                  # nach <ziel>/_Papierkorb/<Take>/ verschoben, nie gelöscht)
 gegenprobe = true
 
 [obs]
@@ -74,6 +75,7 @@ crf = 16
 datenordner = "<Datenordner von Camera Hub, z. B. C:/Users/<name>/AppData/Roaming/Elgato/CameraHub>"
 programm = "<Pfad zu Camera Hub.exe>"   # zum Neustart; leer = von Hand starten
 prozessname = "Camera Hub.exe"          # nur dieser Prozess wird beendet, und nur, wenn OBS nicht aufnimmt
+                                        # (nur ein Programmname; OBS, Resolve und Systemprozesse nie)
 
 [transkript]
 backend = "lokal"                 # lokal (faster-whisper) | fern
