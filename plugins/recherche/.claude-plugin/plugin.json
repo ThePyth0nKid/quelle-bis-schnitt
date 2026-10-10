@@ -1,0 +1,12 @@
+{
+  "name": "recherche",
+  "version": "0.1.0",
+  "description": "Originalquellen finden, Belege nach einstellbaren Regeln sammeln und Zitate am Original prüfen: drei Recherche-Agenten, ein unabhängiger Faktenprüfer vor dem Import und eine Entscheidungstabelle, in der der Mensch entscheidet.",
+  "author": {
+    "name": "ThePyth0nKid"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "repository": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "keywords": ["recherche", "quellen", "belege", "faktenpruefung", "zitate", "journalismus", "exa"]
+}

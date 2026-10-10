@@ -1,0 +1,24 @@
+# Vorlage für belegregeln.toml (ins Projekt kopieren und anpassen).
+# Stufen: "aus" | "hinweis" | "sperrt". Standard ist "hinweis"; nur der Schutz von Privatpersonen sperrt.
+# "sperrt" heißt: Der Befund wird dem Menschen vorgelegt, nicht angelegt. Ein Mensch kann mit Begründung überstimmen.
+# Agenten geben nie frei und überstimmen nie.
+
+[stufen]
+quelle_pflicht = "hinweis"            # B1  kein Faden ohne Quelle
+wortlaut_original = "hinweis"         # B2  Wortlaut nur aus dem Original
+aussageart = "hinweis"                # B3  belegt / verdacht / meinung ehrlich setzen
+erwaehnt_kontakt_schuldig = "hinweis" # B4  Etikett sagt, was belegt ist
+vorwurf_mit_instanz = "hinweis"       # B5  Vorwurf nur mit Gericht, Behörde oder Vergleich
+verfahrensstand = "hinweis"           # B6  Festnahme ≠ Anklage ≠ Urteil
+keine_charakterworte = "hinweis"      # B7  keine Wertungen über Charakter
+privatpersonen = "sperrt"             # B8  Privatpersonen ohne Namen
+entlastendes = "hinweis"              # B9  Entlastendes aus derselben Quelle mitnehmen
+primaerwortlaut = "hinweis"           # B10 Primärwortlaut vor Presse
+auslassung = "hinweis"                # B11 Auslassungen verschieben keinen Bezug
+zeitraum = "hinweis"                  # B12 Zeitangaben ehrlich
+sicherung = "hinweis"                 # B13 Quelle gesichert
+
+# Abweichende Stufen je Thema oder Board, z. B. strengere Regeln bei Straftaten:
+# [themen.beispiel-strafverfahren]
+# vorwurf_mit_instanz = "sperrt"
+# keine_charakterworte = "sperrt"

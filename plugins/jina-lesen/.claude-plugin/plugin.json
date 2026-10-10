@@ -1,0 +1,21 @@
+{
+  "name": "jina-lesen",
+  "version": "0.1.0",
+  "description": "Jina als MCP: Webseiten und PDFs als Text lesen, Veröffentlichungsdatum schätzen, im Netz suchen. Braucht einen eigenen Schlüssel von jina.ai.",
+  "author": {
+    "name": "ThePyth0nKid"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "repository": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "keywords": ["recherche", "jina", "lesen", "pdf", "mcp"],
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "Jina-Schlüssel",
+      "description": "Dein API-Schlüssel von jina.ai. Wird als geheimer Wert gespeichert und nur im Authorization-Header an mcp.jina.ai geschickt.",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}

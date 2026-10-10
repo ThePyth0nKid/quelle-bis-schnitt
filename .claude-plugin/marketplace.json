@@ -9,5 +9,58 @@
     "description": "Claude-Code-Plugins von der Quelle bis zum Schnitt. Plugin akte folgt.",
     "version": "0.1.0"
   },
-  "plugins": []
+  "plugins": [
+    {
+      "name": "recherche",
+      "description": "Originalquellen finden, Belege nach einstellbaren Regeln sammeln und Zitate am Original prüfen: drei Recherche-Agenten, ein unabhängiger Faktenprüfer vor dem Import und eine Entscheidungstabelle, in der der Mensch entscheidet.",
+      "source": "./plugins/recherche",
+      "version": "0.1.0",
+      "author": {
+        "name": "ThePyth0nKid"
+      },
+      "license": "MIT",
+      "keywords": [
+        "recherche",
+        "quellen",
+        "belege",
+        "faktenpruefung",
+        "zitate",
+        "journalismus",
+        "exa"
+      ]
+    },
+    {
+      "name": "jina-lesen",
+      "description": "Jina als MCP: Webseiten und PDFs als Text lesen, Veröffentlichungsdatum schätzen, im Netz suchen. Braucht einen eigenen Schlüssel von jina.ai.",
+      "source": "./plugins/jina-lesen",
+      "version": "0.1.0",
+      "author": {
+        "name": "ThePyth0nKid"
+      },
+      "license": "MIT",
+      "keywords": [
+        "recherche",
+        "jina",
+        "lesen",
+        "pdf",
+        "mcp"
+      ]
+    },
+    {
+      "name": "tavily-suche",
+      "description": "Tavily als MCP: zweite Suchmaschine neben Exa, dazu Extract, Map und Crawl. Braucht einen eigenen Schlüssel von tavily.com.",
+      "source": "./plugins/tavily-suche",
+      "version": "0.1.0",
+      "author": {
+        "name": "ThePyth0nKid"
+      },
+      "license": "MIT",
+      "keywords": [
+        "recherche",
+        "tavily",
+        "suche",
+        "mcp"
+      ]
+    }
+  ]
 }

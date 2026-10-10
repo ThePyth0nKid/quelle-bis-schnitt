@@ -1,0 +1,21 @@
+{
+  "name": "tavily-suche",
+  "version": "0.1.0",
+  "description": "Tavily als MCP: zweite Suchmaschine neben Exa, dazu Extract, Map und Crawl. Braucht einen eigenen Schlüssel von tavily.com.",
+  "author": {
+    "name": "ThePyth0nKid"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "repository": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "keywords": ["recherche", "tavily", "suche", "mcp"],
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "Tavily-Schlüssel",
+      "description": "Dein API-Schlüssel von tavily.com. Wird als geheimer Wert gespeichert und nur im Authorization-Header an mcp.tavily.com geschickt.",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}

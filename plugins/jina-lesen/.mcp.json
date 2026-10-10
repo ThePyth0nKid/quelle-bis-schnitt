@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "jina": {
+      "type": "http",
+      "url": "https://mcp.jina.ai/v1",
+      "headers": {
+        "Authorization": "Bearer ${user_config.api_key}"
+      }
+    }
+  }
+}
