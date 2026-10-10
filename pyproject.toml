@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MIT
+# Nur Werkzeug-Einstellungen für das ganze Repo (ruff, pytest); kein installierbares Paket.
+# Das installierbare Paket liegt in plugins/studio/werkzeuge/.
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [".venv", "venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib -q"
+testpaths = ["werkzeuge", "plugins"]

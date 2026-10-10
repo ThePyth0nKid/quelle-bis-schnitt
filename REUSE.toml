@@ -1,0 +1,18 @@
+version = 1
+SPDX-PackageName = "quelle-bis-schnitt"
+SPDX-PackageSupplier = "ThePyth0nKid"
+SPDX-PackageDownloadLocation = "https://github.com/ThePyth0nKid/quelle-bis-schnitt"
+
+# Grundregel: Code, Skills, Agenten, Befehle, Vorlagen und Werkzeuge stehen unter MIT.
+[[annotations]]
+path = "**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 ThePyth0nKid und Mitwirkende"
+SPDX-License-Identifier = "MIT"
+
+# Dokumentation steht unter CC BY 4.0.
+[[annotations]]
+path = ["docs/**", "plugins/*/docs/**", "README.md", "README.en.md"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 ThePyth0nKid und Mitwirkende"
+SPDX-License-Identifier = "CC-BY-4.0"

@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: MIT
+# Prüft jeden Push und jeden Pull Request: Leck-Schutz, Lizenzangaben, Plugin-Manifeste, Python-Werkzeuge.
+name: pruefen
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  leck-schutz:
+    name: Geheimnisse, Sperrliste, Lizenzangaben
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks über die ganze Historie
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks git --redact --no-banner .
+
+      # Die private Sperrliste kommt nur im Original-Repo aus einem Actions-Secret.
+      # Forks und Pull Requests von außen bekommen kein Secret und prüfen nur die öffentlichen Regeln.
+      - name: Sperrliste über die ganze Historie
+        env:
+          OSS_SCRUB_SPERRLISTE_INHALT: ${{ secrets.OSS_SCRUB_SPERRLISTE_INHALT }}
+          IST_ORIGINAL: ${{ github.repository == 'ThePyth0nKid/quelle-bis-schnitt' && github.event_name != 'pull_request' }}
+        run: |
+          if [ -n "$OSS_SCRUB_SPERRLISTE_INHALT" ]; then
+            python3 werkzeuge/scrub/pruefen.py --historie --privat-pflicht
+          elif [ "$IST_ORIGINAL" = "true" ]; then
+            echo "::error::Secret OSS_SCRUB_SPERRLISTE_INHALT fehlt im Original-Repo."
+            exit 1
+          else
+            echo "::notice::Ohne private Sperrliste (Fork oder Pull Request von außen): nur öffentliche Regeln."
+            python3 werkzeuge/scrub/pruefen.py --historie --nur-oeffentlich
+          fi
+
+      - name: REUSE (Lizenzangaben je Datei)
+        run: pipx run reuse lint
+
+  plugins:
+    name: Marktplatz und Plugins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Claude Code (nur für plugin validate, ohne Anmeldung)
+        run: npm install -g @anthropic-ai/claude-code
+      - name: claude plugin validate --strict
+        run: |
+          claude plugin validate --strict .
+          for p in plugins/*/; do
+            claude plugin validate --strict "$p"
+          done
+      - name: Querprüfung Marktplatz, Frontmatter, .mcp.json
+        run: python3 werkzeuge/marktplatz/pruefen.py
+
+  python:
+    name: Python (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      # Tests, die ffmpeg brauchen, werden ohne ffmpeg übersprungen; unter Linux läuft es mit.
+      - name: ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - name: Umgebung
+        run: |
+          uv venv --python 3.12
+          uv pip install pytest ruff requests
+          if [ -d plugins/studio/werkzeuge ]; then uv pip install -e "plugins/studio/werkzeuge[test]"; fi
+      - name: ruff
+        run: uv run --no-sync ruff check .
+      - name: pytest
+        run: uv run --no-sync pytest
