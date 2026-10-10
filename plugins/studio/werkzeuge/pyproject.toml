@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: MIT
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "studio-werkzeuge"
+version = "0.1.0"
+description = "Werkzeuge für Dreh und Schnitt: Klicks messen, Ton mastern, zwei Kameras synchronisieren, OBS-Modi, Prompter, Transkript."
+readme = { text = "Werkzeug `studio` aus dem Plugin studio im Marktplatz quelle-bis-schnitt. Hilfe: `studio --help`.", content-type = "text/markdown" }
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "ThePyth0nKid und Mitwirkende" }]
+keywords = ["video", "ffmpeg", "obs", "loudness", "ebu-r128", "zwei-kamera"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Environment :: Console",
+  "Topic :: Multimedia :: Video",
+  "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
+dependencies = ["numpy>=1.24", "scipy>=1.10"]
+
+[project.optional-dependencies]
+obs = ["obsws-python>=1.6"]
+whisper = ["faster-whisper>=1.0"]
+test = ["pytest>=8"]
+
+[project.scripts]
+studio = "studio_werkzeuge.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ThePyth0nKid/quelle-bis-schnitt"
+Source = "https://github.com/ThePyth0nKid/quelle-bis-schnitt/tree/main/plugins/studio/werkzeuge"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/studio_werkzeuge"]

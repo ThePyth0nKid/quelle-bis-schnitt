@@ -1,0 +1,87 @@
+# studio.toml – Konfiguration für das Werkzeug `studio`
+# SPDX-License-Identifier: MIT
+#
+# Werte in <spitzen Klammern> gelten als NICHT eingetragen: ersetzen oder die Zeile löschen.
+# Pfade mit / schreiben (auch unter Windows), z. B. "C:/Aufnahmen/inbox".
+# Gesucht wird: $STUDIO_KONFIG → ./studio.toml → Benutzer-Konfigordner
+#   (Windows %APPDATA%/studio/studio.toml, sonst ~/.config/studio/studio.toml).
+# Prüfen: studio konfig zeigen
+#
+# Zahlen ohne Quellenangabe hier sind einstellbare Voreinstellungen, keine Messwerte.
+
+[pfade]
+inbox = "<inbox>"                 # dorthin schreibt OBS (Source Record) die Kameradateien
+ziel = ""                         # leer = wie inbox: je Take ein Ordner darin
+
+[kameras]
+# Dateinamen der Source-Record-Ausgaben: <praefix><JJJJMMTT-HHMMSS><endung>
+# (in OBS im Filter als Dateiname z. B. "cam-A-%CCYY%MM%DD-%hh%mm%ss" einstellen)
+praefix_a = "cam-A-"
+praefix_b = "cam-B-"
+endung = ".mp4"
+# Namen in OBS: die Kameraquellen und ihre Source-Record-Filter (für obs-modus und die Startprüfung des Wächters)
+quelle_a = "<Name der Kameraquelle A in OBS>"
+filter_a = "<Name des Source-Record-Filters an Quelle A>"
+quelle_b = "<Name der Kameraquelle B in OBS>"
+filter_b = "<Name des Source-Record-Filters an Quelle B>"
+
+[paar]
+encoder = "libx264"               # libx264 (überall) oder h264_nvenc (NVIDIA)
+cq = 18                           # Qualität der neu kodierten Kamera B (kleiner = besser)
+drehung_b = "keine"               # keine | links | rechts (Kamera B hochkant montiert)
+rohdateien = "behalten"           # behalten (nach <Take>/Roh/) | papierkorb (nur Windows, nach grünem Bau)
+gegenprobe = true
+
+[obs]
+host = "127.0.0.1"
+port = 4455
+passwort_umgebung = "OBS_WEBSOCKET_PASSWORT"   # NAME der Umgebungsvariable mit dem Passwort, nie das Passwort selbst
+
+[obs_modus]
+sicherung = "<ordner für Filter-Sicherungen>"  # vor jeder Änderung landen die Filtereinstellungen hier als JSON
+
+# Ein Modus setzt nur die genannten Schlüssel; alle anderen Filtereinstellungen bleiben.
+# Grobe Größe: Bitrate in kbit/s × 3600 / 8 / 1 000 000 = GB je Stunde (20 000 kbit/s ≈ 9 GB je Stunde und Kamera).
+[obs_modus.modi.lang]
+rate_control = "VBR"
+bitrate = 20000
+max_bitrate = 30000
+
+[obs_modus.modi.max]
+rate_control = "CQP"
+cqp = 18
+
+[waechter]
+windows_hinweis = true            # stille Windows-Benachrichtigung; sonst nur Protokoll
+startpruefung = true              # bei Rec: Kameras lebendig, Dateien wachsen, Mikrofon hat Pegel
+bau_max_min = 60                  # länger = Bau hängt, abbrechen und melden
+
+[klicks]
+faktor = 12.0                     # Sprung > faktor × lokaler Pegel (eigene Messung, docs/messungen/studio-klicks.md)
+minimum = 0.03                    # und absolut darüber
+gruen_unter = 5.0                 # Klicks je Minute (eigene Messung, docs/messungen/studio-klicks.md)
+rot_ueber = 15.0
+pegel_bezug_dbfs = -23.0          # Anhaltspunkt nach EBU R 128 (−23 LUFS)
+pegel_toleranz_db = 10.0
+
+[mastern]
+ziel_lufs = -14.0
+ziel_true_peak = -1.5
+max_begrenzer_db = 3.0
+crf = 16
+
+[prompter]
+datenordner = "<Datenordner von Camera Hub, z. B. C:/Users/<name>/AppData/Roaming/Elgato/CameraHub>"
+programm = "<Pfad zu Camera Hub.exe>"   # zum Neustart; leer = von Hand starten
+prozessname = "Camera Hub.exe"          # nur dieser Prozess wird beendet, und nur, wenn OBS nicht aufnimmt
+
+[transkript]
+backend = "lokal"                 # lokal (faster-whisper) | fern
+modell = "large-v3"
+sprache = "de"
+geraet = "auto"                   # auto (CUDA, sonst CPU) | cuda | cpu
+
+[transkript.fern]
+# Befehlsliste ohne Shell. Bekommt WAV (16 kHz, mono) auf stdin, liefert {"segmente": [...]} auf stdout.
+befehl = []                       # z. B. ["ssh", "-o", "BatchMode=yes", "<benutzer>@<rechner>", "<befehl>"]
+zeitlimit_s = 3600

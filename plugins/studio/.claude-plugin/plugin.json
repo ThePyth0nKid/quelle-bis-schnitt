@@ -1,0 +1,21 @@
+{
+  "name": "studio",
+  "version": "0.1.0",
+  "description": "Dreh, Ton, Schnitt und Abgabe für Sprechvideos: zwei Kameras in OBS, Prompter, Klick-Messung, Mastern auf -14 LUFS, Timeline in DaVinci Resolve aus einem Bauplan. Mit dem Werkzeug studio (Python) und dem Befehl /studio:einrichten.",
+  "author": {
+    "name": "ThePyth0nKid"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "repository": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "keywords": [
+    "video",
+    "obs",
+    "davinci-resolve",
+    "teleprompter",
+    "audio",
+    "loudness",
+    "zwei-kamera",
+    "schnitt"
+  ]
+}
