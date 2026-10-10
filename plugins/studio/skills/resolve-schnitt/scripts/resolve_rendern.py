@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import sys
 import time
 from pathlib import Path
@@ -33,11 +34,18 @@ def p(*a) -> None:
     print(*a, flush=True)
 
 
-def tc(bild: int, fps: int) -> str:
-    h, rest = divmod(bild, 3600 * fps)
-    m, rest = divmod(rest, 60 * fps)
-    s, f = divmod(rest, fps)
-    return f"{h:02d}:{m:02d}:{s:02d}:{f:02d}"
+def tc(bild: int, fps: float | str, drop: bool = False) -> str:
+    """Bildnummer → Timecode (Nennwert-Zählung, Drop-Frame mit „;“); siehe resolve_api.bild_zu_tc."""
+    return ra.bild_zu_tc(bild, fps, drop)
+
+
+VERBOTEN = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+
+
+def sicherer_stamm(name: str) -> str:
+    """Dateinamen-Stamm aus einem Timeline-Namen oder --name: kein Ordneranteil, keine Trenner, keine Doppelpunkte."""
+    stamm = VERBOTEN.sub("_", Path(str(name).replace("\\", "/")).name).strip(" .")
+    return stamm or "timeline"
 
 
 def freier_name(ziel: Path, stamm: str, endung: str) -> str:
@@ -68,28 +76,36 @@ def _sha(pfad: Path) -> str:
 
 def stills(proj, tl, zeiten: list[float], ziel: Path, stamm: str, warte_s: float = 0.5) -> list[str]:
     """Standbilder ohne Render. Das erste Bild nach dem Laden ist unzuverlässig (F19): ein Aufwärmbild wird geschrieben
-    und gelöscht; ein Bild, das byte-gleich zum vorigen ist (andere Stelle), wird einmal neu geholt."""
-    fps = int(round(float(tl.GetSetting("timelineFrameRate"))))
+    und gelöscht; ein Bild, das byte-gleich zum vorigen ist (andere Stelle), wird einmal neu geholt.
+
+    Bildnummern bei der echten Bildrate (23,976 / 29,97 …), Timecodes mit Nennwert-Zählung und Drop-Frame, wie die
+    Timeline sie zeigt. Vorhandene Dateien werden nie überschrieben; gelöscht wird nur, was dieser Lauf selbst
+    schrieb."""
+    stamm = sicherer_stamm(stamm)
+    fps = str(tl.GetSetting("timelineFrameRate"))
+    drop = ra.timeline_drop_frame(tl)
     s0 = tl.GetStartFrame()
-    aufwaermen = ziel / f"{stamm}_aufwaermen.png"
-    tl.SetCurrentTimecode(tc(s0, fps))
+    aufwaermen = ziel / f"{freier_name(ziel, f'{stamm}_aufwaermen', '.png')}.png"
+    tl.SetCurrentTimecode(tc(s0, fps, drop))
     time.sleep(warte_s)
     vorige, vorige_bild = None, 0
     if proj.ExportCurrentFrameAsStill(str(aufwaermen)) and aufwaermen.exists():
         vorige = _sha(aufwaermen)
-        aufwaermen.unlink()
+        aufwaermen.unlink()                  # vorher frei gewählt, also sicher eine eigene Datei
     aus: list[str] = []
     for t in zeiten:
-        b = int(round(t * fps))
-        pfad = ziel / f"{stamm}_bild{b:06d}.png"
+        b = ra.frames(t, fps)
+        pfad = ziel / f"{freier_name(ziel, f'{stamm}_bild{b:06d}', '.png')}.png"
         for _versuch in range(2):
-            tl.SetCurrentTimecode(tc(s0 + b, fps))
+            tl.SetCurrentTimecode(tc(s0 + b, fps, drop))
             time.sleep(warte_s)
             ok = proj.ExportCurrentFrameAsStill(str(pfad)) is True and pfad.exists()
             # gleich dem vorigen Bild bei anderer Stelle = Resolve hinkt hinterher
             if ok and (vorige is None or b == vorige_bild or _sha(pfad) != vorige):
                 break
         else:
+            if pfad.exists():
+                pfad.unlink()                    # eigene, unzuverlässige Datei nicht als Beleg liegen lassen
             p(f"  Standbild bei {t:.2f} s unzuverlässig (abgelehnt oder gleich dem vorigen): bitte von Hand prüfen")
             continue
         vorige, vorige_bild = _sha(pfad), b
@@ -99,7 +115,7 @@ def stills(proj, tl, zeiten: list[float], ziel: Path, stamm: str, warte_s: float
 
 def render_einstellungen(tl, ziel: Path, name: str, fmt: str, codec: str, von: float | None,
                          bis: float | None) -> dict:
-    fps = float(tl.GetSetting("timelineFrameRate"))
+    fps = str(tl.GetSetting("timelineFrameRate"))
     s0 = tl.GetStartFrame()
     einst = {"SelectAllFrames": von is None and bis is None, "TargetDir": str(ziel), "CustomName": name,
              "ExportVideo": True, "ExportAudio": True,
@@ -107,8 +123,8 @@ def render_einstellungen(tl, ziel: Path, name: str, fmt: str, codec: str, von: f
              "FormatHeight": int(tl.GetSetting("timelineResolutionHeight")),
              "AudioCodec": "aac", "AudioSampleRate": 48000}
     if not einst["SelectAllFrames"]:
-        einst["MarkIn"] = s0 + int(round((von or 0.0) * fps))
-        einst["MarkOut"] = (s0 + int(round(bis * fps)) - 1) if bis is not None else tl.GetEndFrame() - 1
+        einst["MarkIn"] = s0 + ra.frames(von or 0.0, fps)
+        einst["MarkOut"] = (s0 + ra.frames(bis, fps) - 1) if bis is not None else tl.GetEndFrame() - 1
     if fmt == "mov" and codec.startswith("ProRes"):
         einst["AudioCodec"] = "lpcm"
     return einst
@@ -176,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     ziel = Path(a.ziel)
     ziel.mkdir(parents=True, exist_ok=True)
-    stamm = a.name or tl.GetName()
+    stamm = sicherer_stamm(a.name or tl.GetName())
     if a.stills:
         r.OpenPage("edit")
         for s in stills(proj, tl, [float(x) for x in a.stills.split(",") if x.strip()], ziel, stamm):

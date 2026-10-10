@@ -131,6 +131,10 @@ class Timeline:
         self.links.append(items)
         return True
 
+    def GetItemListInTrack(self, art, idx):
+        return sorted((i for i in self.items if getattr(i, "art", None) == art and i.info["trackIndex"] == idx),
+                      key=lambda i: i.start)
+
     def platzieren(self, info):
         art = "video" if info.get("mediaType") == 1 else "audio"
         if info["trackIndex"] > self.spuren[art]:
@@ -152,6 +156,11 @@ class MediaPool:
         self.aktuell = self.wurzel
         self.importiert: list[str] = []
         self.verweigere_ab: int | None = None  # ab diesem recordFrame wird nichts gesetzt
+        # Stapel-Verhalten wie im Fehlerfall gemessen: diese recordFrames scheitern im Stapel, und die Rückgabeliste
+        # enthält dann NUR die gesetzten Items (kürzer als die Eingabe); einzeln nachgesetzt klappt es
+        self.stapel_luecken: set[int] = set()
+        self.nie: set[int] = set()            # diese recordFrames scheitern immer
+        self.aufrufe: list[int] = []          # Länge jedes AppendToTimeline-Aufrufs
 
     def GetRootFolder(self):
         return self.wurzel
@@ -179,9 +188,15 @@ class MediaPool:
 
     def AppendToTimeline(self, infos):
         tl = self.projekt.aktuelle
+        self.aufrufe.append(len(infos))
         aus = []
+        stapel = len(infos) > 1
         for info in infos:
-            if self.verweigere_ab is not None and info["recordFrame"] >= self.verweigere_ab:
+            rf = info["recordFrame"]
+            if rf in self.nie or (stapel and rf in self.stapel_luecken):
+                if not (stapel and self.stapel_luecken):
+                    aus.append(TotesItem())
+            elif self.verweigere_ab is not None and rf >= self.verweigere_ab:
                 aus.append(TotesItem())
             else:
                 aus.append(tl.platzieren(info))

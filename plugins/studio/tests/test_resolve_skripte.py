@@ -261,6 +261,10 @@ class StillTimeline(fake.Timeline):
         super().__init__("s")
         self.settings["timelineFrameRate"] = "25"
         self.tc = ""
+        self.start = fake.START
+
+    def GetStartFrame(self):
+        return self.start
 
     def SetCurrentTimecode(self, tc):
         self.tc = tc
@@ -277,3 +281,130 @@ def test_stills_aufwaermen_und_gleiche_bilder(tmp_path):
     haengt.mkdir()
     aus2 = rr.stills(StillProjekt(tl2, haengt=True), tl2, [1.0, 2.0], haengt, "p", warte_s=0)
     assert aus2 == []                            # jedes Bild gleich dem Aufwärmbild: keines zählt (F19)
+
+
+# ---- Timecode (Befund: Float-fps, Nennwert, Drop-Frame) --------------------------------------------------------
+
+@pytest.mark.parametrize(("bild", "fps", "drop", "tc"), [
+    (0, 25, False, "00:00:00:00"),
+    (90030, 25, False, "01:00:01:05"),
+    (24, "23.976", False, "00:00:01:00"),            # Nennwert 24, nicht 23
+    (1800, "29.97", False, "00:01:00:00"),
+    (1799, "29.97", True, "00:00:59;29"),
+    (1800, "29.97", True, "00:01:00;02"),            # Bildnummern 00 und 01 übersprungen
+    (17982, "29.97", True, "00:10:00;00"),           # jede zehnte Minute ohne Sprung
+    (107892, "29.97", True, "01:00:00;00"),
+    (3600, "59.94", True, "00:01:00;04"),            # 59,94: vier Nummern je Minute
+])
+def test_bild_zu_tc_und_zurueck(bild, fps, drop, tc):
+    assert ra.bild_zu_tc(bild, fps, drop) == tc
+    assert ra.tc_zu_bild(tc, fps) == bild            # Drop-Frame aus dem „;“ erkannt
+
+
+@pytest.mark.parametrize("fps", ["29.97", "59.94"])
+def test_drop_frame_rundlauf(fps):
+    for bild in list(range(0, 4000, 7)) + list(range(17970, 18010)) + [107892, 215784 + 3]:
+        assert ra.tc_zu_bild(ra.bild_zu_tc(bild, fps, True), fps) == bild
+
+
+def test_drop_frame_nur_bei_2997_und_5994():
+    with pytest.raises(ValueError):
+        ra.bild_zu_tc(10, 25, drop=True)
+    with pytest.raises(ValueError):
+        ra.bild_zu_tc(10, 30, drop=True)
+
+
+def test_tc_in_sekunden_echte_laufzeit():
+    assert ra.tc_in_sekunden("00:00:01:00", "23.976") == pytest.approx(24 / 23.976)
+    assert ra.tc_in_sekunden("01:00:00:00", "29.97") == pytest.approx(108000 / 29.97)      # Non-Drop läuft davon
+    assert ra.tc_in_sekunden("01:00:00;00", "29.97") == pytest.approx(107892 / 29.97)      # Drop-Frame folgt der Uhr
+    assert ra.tc_in_sekunden("01:00:02:05", 25) == pytest.approx(3602.2)
+
+
+def test_frames_mit_gebrochener_bildrate():
+    assert ra.frames(1.0, "29.97") == 30
+    assert ra.frames(10.0, "23.976") == 240
+    assert ra.frames(60.0, "29.97") == 1798
+
+
+def test_stills_drop_frame_timeline(tmp_path):
+    tl = StillTimeline()
+    tl.settings.update(timelineFrameRate="29.97", timelineDropFrameTimecode="1")
+    tl.start = ra.tc_zu_bild("01:00:00;00", "29.97")
+    besucht = []
+    projekt = StillProjekt(tl)
+    alt = tl.SetCurrentTimecode
+
+    def merken(tc):
+        besucht.append(tc)
+        return alt(tc)
+
+    tl.SetCurrentTimecode = merken
+    aus = rr.stills(projekt, tl, [1.0, 60.0], tmp_path, "p", warte_s=0)
+    assert besucht[0] == "01:00:00;00"                  # Aufwärmbild am Timeline-Start
+    assert "01:00:01;00" in besucht and "01:00:59;28" in besucht
+    assert [Path(x).name for x in aus] == ["p_bild000030.png", "p_bild001798.png"]
+
+
+# ---- Dateinamen und Überschreiben (Befund: stamm bereinigen, nie überschreiben) --------------------------------
+
+@pytest.mark.parametrize(("roh", "erwartet"), [
+    ("schnitt-0905", "schnitt-0905"),
+    ("ordner/teil:2", "teil_2"),
+    (r"..\..\böse", "böse"),
+    ('a*b?"c<d>|e', "a_b_c_d_e"),
+    ("...", "timeline"),
+    ("", "timeline"),
+])
+def test_sicherer_stamm(roh, erwartet):
+    assert rr.sicherer_stamm(roh) == erwartet
+
+
+def test_stills_ueberschreiben_nie(tmp_path):
+    fremd_bild = tmp_path / "p_bild000025.png"
+    fremd_bild.write_text("fremd", encoding="utf-8")
+    fremd_auf = tmp_path / "p_aufwaermen.png"
+    fremd_auf.write_text("fremd", encoding="utf-8")
+    tl = StillTimeline()
+    aus = rr.stills(StillProjekt(tl), tl, [1.0], tmp_path, "p", warte_s=0)
+    assert [Path(x).name for x in aus] == ["p_bild000025-2.png"]
+    assert fremd_bild.read_text(encoding="utf-8") == "fremd"
+    assert fremd_auf.read_text(encoding="utf-8") == "fremd"          # fremde Datei nicht gelöscht
+    assert not (tmp_path / "p_aufwaermen-2.png").exists()           # eigene Aufwärmdatei weg
+
+
+def test_stills_bereinigt_stamm(tmp_path):
+    tl = StillTimeline()
+    aus = rr.stills(StillProjekt(tl), tl, [1.0], tmp_path, "../ausbruch:1", warte_s=0)
+    assert [Path(x).parent for x in aus] == [tmp_path]
+    assert Path(aus[0]).name == "ausbruch_1_bild000025.png"
+
+
+# ---- setzen (Befund: kürzere Rückgabeliste nach Teilfehlschlag) ------------------------------------------------
+
+def _setz_umgebung(resolve, n=4):
+    proj = ra.projekt_holen(resolve, "S")
+    mp = proj.GetMediaPool()
+    tl = ra.neue_timeline(proj, mp, "s", 1920, 1080, 25)
+    pool = fake.PoolItem("/medien/a.mp4")
+    infos = [{"mediaPoolItem": pool, "startFrame": 0, "endFrame": 10, "trackIndex": 1,
+              "recordFrame": fake.START + 10 * k, "mediaType": 1} for k in range(n)]
+    return mp, tl, infos
+
+
+def test_setzen_kuerzere_rueckgabe_wird_nicht_positionsweise_verglichen(resolve):
+    mp, tl, infos = _setz_umgebung(resolve)
+    mp.stapel_luecken = {fake.START + 10}                 # zweites Item fehlt im Stapel, Liste ist um eins kürzer
+    gesetzt = rb.setzen(mp, tl, "video", infos)
+    assert [g.GetStart() for g in gesetzt] == [i["recordFrame"] for i in infos]
+    assert mp.aufrufe == [4, 1]                           # nur das fehlende einzeln nachgesetzt
+    assert len(tl.items) == 4                             # nichts doppelt gesetzt
+
+
+def test_setzen_dauerhafter_fehlschlag_bleibt_none(resolve):
+    mp, tl, infos = _setz_umgebung(resolve)
+    mp.stapel_luecken = {fake.START + 20}
+    mp.nie = {fake.START + 20}
+    gesetzt = rb.setzen(mp, tl, "video", infos)
+    assert [g.GetStart() if g is not None else None for g in gesetzt] == \
+        [fake.START, fake.START + 10, None, fake.START + 30]

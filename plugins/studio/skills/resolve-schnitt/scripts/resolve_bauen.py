@@ -36,21 +36,35 @@ def lebt(item) -> bool:
     return item is not None and item.GetStart() is not None
 
 
-def setzen(mp, infos: list[dict]) -> list:
-    """AppendToTimeline im Stapel; was dabei nicht ankommt, einzeln nachsetzen. Rückgabe in Reihenfolge der infos."""
+def _auf_platz(item, info: dict) -> bool:
+    return lebt(item) and item.GetStart() == info["recordFrame"]
+
+
+def setzen(mp, tl, art: str, infos: list[dict]) -> list:
+    """AppendToTimeline im Stapel; Rückgabe in Reihenfolge der infos (None = nicht gesetzt).
+
+    Kommt ein Stapel nicht vollständig und in Reihenfolge an, wird die Rückgabeliste NICHT Position für Position
+    verglichen (sie kann kürzer sein oder tote Objekte enthalten, F9). Stattdessen wird die Spur mit
+    ``GetItemListInTrack`` neu eingelesen; nur was dort am geplanten Startbild fehlt, wird einzeln nachgesetzt."""
     aus: list = []
     for a in range(0, len(infos), STAPEL):
         teil = infos[a:a + STAPEL]
-        res = mp.AppendToTimeline(teil) or []
-        if len(res) == len(teil) and all(lebt(x) for x in res):
+        res = list(mp.AppendToTimeline(teil) or [])
+        if len(res) == len(teil) and all(_auf_platz(x, i) for x, i in zip(res, teil, strict=True)):
             aus.extend(res)
             continue
-        for einzel, alt in zip(teil, list(res) + [None] * (len(teil) - len(res)), strict=False):
-            if lebt(alt) and alt.GetStart() == einzel["recordFrame"]:
-                aus.append(alt)
-                continue
-            neu = mp.AppendToTimeline([einzel]) or [None]
-            aus.append(neu[0] if lebt(neu[0]) else None)
+        spuren = {i["trackIndex"] for i in teil}
+        vorhanden = {}
+        for idx in spuren:
+            for item in tl.GetItemListInTrack(art, idx) or []:
+                if lebt(item):
+                    vorhanden[(idx, item.GetStart())] = item
+        for info in teil:
+            obj = vorhanden.get((info["trackIndex"], info["recordFrame"]))
+            if obj is None:
+                neu = (mp.AppendToTimeline([info]) or [None])[0]
+                obj = neu if _auf_platz(neu, info) else None
+            aus.append(obj)
     return aus
 
 
@@ -192,7 +206,7 @@ def bauen(plan: dict, sicherung: Path | None, bericht_pfad: Path | None, r=None)
             # mediaType 1 = nur Bild, 2 = nur Ton; sonst landet der Kamera-Ton auf der Spur der Stimme (F16)
             infos.append({"mediaPoolItem": pool[k], "startFrame": q_ab, "endFrame": q_bis, "trackIndex": idx,
                           "recordFrame": s0 + ab, "mediaType": 1 if art == "video" else 2})
-        gesetzt = setzen(mp, infos)
+        gesetzt = setzen(mp, tl, art, infos)
         ok_n = 0
         for it, obj in zip(items, gesetzt, strict=True):
             ab, bis = bp.kanten(it, fps)

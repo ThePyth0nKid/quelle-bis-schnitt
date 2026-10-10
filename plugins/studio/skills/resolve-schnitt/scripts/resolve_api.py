@@ -164,15 +164,72 @@ def neue_timeline(proj, mp, stamm: str, breite: int, hoehe: int, fps: float | st
     return tl
 
 
-def frames(sekunden: float, fps: float) -> int:
-    """Sekunden → ganze Bilder, kaufmännisch gerundet über Brüche (kein Gleitkomma-Schlupf an .5-Grenzen)."""
+def frames(sekunden: float, fps: float | str) -> int:
+    """Sekunden → ganze Bilder bei der echten Bildrate (auch 23,976 / 29,97), kaufmännisch gerundet über Brüche."""
     return int(Fraction(str(sekunden)) * Fraction(str(fps)) + Fraction(1, 2))
 
 
-def tc_in_sekunden(tc: str, fps: float) -> float:
-    """'01:00:02:05' → Sekunden seit 00:00:00:00 (Non-Drop)."""
+# ---- Timecode ------------------------------------------------------------------------------------------------
+# Ein Timecode zählt Bilder mit dem NENNWERT der Bildrate (23,976 → 24, 29,97 → 30, 59,94 → 60). Bei Drop-Frame
+# (nur 29,97 und 59,94; Trenner „;“) werden zu jeder vollen Minute außer jeder zehnten 2 bzw. 4 Bildnummern
+# übersprungen, damit der Timecode der Uhrzeit folgt (SMPTE ST 12-1).
+
+def nennwert(fps: float | str) -> int:
+    """Zählwert des Timecodes: 23,976 → 24, 25 → 25, 29,97 → 30, 59,94 → 60."""
+    return int(round(float(fps)))
+
+
+def _drop_bilder(fps: float | str) -> int:
+    n = nennwert(fps)
+    if n not in (30, 60) or float(fps) == n:
+        raise ValueError(f"Drop-Frame gibt es nur bei 29,97 und 59,94 fps, nicht bei {fps}")
+    return 2 if n == 30 else 4
+
+
+def bild_zu_tc(bild: int, fps: float | str, drop: bool = False) -> str:
+    """Bildnummer (ab 00:00:00:00 gezählt) → Timecode. Non-Drop mit „:“, Drop-Frame mit „;“ vor den Bildern."""
+    n = nennwert(fps)
+    if bild < 0:
+        raise ValueError("Bildnummer negativ")
+    if drop:
+        d = _drop_bilder(fps)
+        je_10_min = n * 600 - 9 * d          # 17982 bei 29,97
+        je_min = n * 60 - d                   # 1798 bei 29,97
+        zehner, rest = divmod(bild, je_10_min)
+        bild += 9 * d * zehner + (d * ((rest - d) // je_min) if rest > d else 0)
+    h, rest = divmod(bild, 3600 * n)
+    m, rest = divmod(rest, 60 * n)
+    s, f = divmod(rest, n)
+    return f"{h:02d}:{m:02d}:{s:02d}{';' if drop else ':'}{f:02d}"
+
+
+def tc_zu_bild(tc: str, fps: float | str, drop: bool | None = None) -> int:
+    """Timecode → Bildnummer ab 00:00:00:00. Ohne Angabe gilt Drop-Frame, wenn ein „;“ im Timecode steht."""
+    if drop is None:
+        drop = ";" in tc
     h, m, s, f = (int(x) for x in tc.replace(";", ":").split(":"))
-    return h * 3600 + m * 60 + s + f / float(fps)
+    n = nennwert(fps)
+    bild = (h * 3600 + m * 60 + s) * n + f
+    if drop:
+        minuten = h * 60 + m
+        bild -= _drop_bilder(fps) * (minuten - minuten // 10)
+    return bild
+
+
+def tc_in_sekunden(tc: str, fps: float | str, drop: bool | None = None) -> float:
+    """Timecode → Sekunden echter Laufzeit ab 00:00:00:00 (Bildnummer geteilt durch die echte Bildrate).
+
+    Bei 29,97 fps Non-Drop sind das für „01:00:00:00“ rund 3603,6 s, nicht 3600 s: Non-Drop läuft der Uhr davon."""
+    return float(Fraction(tc_zu_bild(tc, fps, drop)) / Fraction(str(fps)))
+
+
+def timeline_drop_frame(tl) -> bool:
+    """Ob die Timeline Drop-Frame-Timecode zeigt (Einstellung oder „;“ im Start-Timecode)."""
+    wert = str(tl.GetSetting("timelineDropFrameTimecode") or "").strip().lower()
+    if wert in ("1", "true"):
+        return True
+    start = tl.GetStartTimecode() if hasattr(tl, "GetStartTimecode") else ""
+    return ";" in str(start or "")
 
 
 def warten(bedingung, timeout_s: float, schritt_s: float = 1.0) -> bool:

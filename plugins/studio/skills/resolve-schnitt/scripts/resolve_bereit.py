@@ -14,6 +14,7 @@ Skript zuerst passiv, bis der Skriptserver-Prozess ``fuscript`` läuft.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -29,7 +30,9 @@ def prozess_laeuft(name: str) -> bool:
     """Läuft ein Prozess dieses Namens? Windows über tasklist, sonst über pgrep."""
     try:
         if sys.platform.startswith("win"):
-            aus = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}.exe", "/NH"],
+            # voller Pfad: kein gleichnamiges Programm aus dem Arbeitsordner oder einem verbogenen PATH
+            tasklist = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "tasklist.exe"
+            aus = subprocess.run([str(tasklist), "/FI", f"IMAGENAME eq {name}.exe", "/NH"],
                                  capture_output=True, text=True, errors="replace", timeout=15).stdout
             return f"{name}.exe".lower() in aus.lower()
         return subprocess.run(["pgrep", "-x", name], capture_output=True, timeout=15).returncode == 0
