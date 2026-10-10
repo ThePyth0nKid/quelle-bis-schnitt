@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Prüft jeden Push und jeden Pull Request: Leck-Schutz, Lizenzangaben, Plugin-Manifeste, Python-Werkzeuge.
+# Actions sind auf Commit-SHAs festgenagelt (Tag im Kommentar); Werkzeuge mit fester Version.
 name: pruefen
 
 on:
@@ -16,23 +17,28 @@ jobs:
     name: Geheimnisse, Sperrliste, Lizenzangaben
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: gitleaks über die ganze Historie
         env:
           GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
         run: |
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz gitleaks
+          curl -sSfLo gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf gitleaks.tar.gz gitleaks
           ./gitleaks git --redact --no-banner .
 
-      # Die private Sperrliste kommt nur im Original-Repo aus einem Actions-Secret.
-      # Forks und Pull Requests von außen bekommen kein Secret und prüfen nur die öffentlichen Regeln.
+      # Die private Sperrliste kommt nur bei Push und manuellem Lauf im Original-Repo aus einem Actions-Secret.
+      # Pull Requests (auch aus Branches des Original-Repos) bekommen es nie: Der PR-Stand könnte das Prüfskript
+      # verändern und das Secret ausgeben. Sie prüfen nur die öffentlichen Regeln; die volle Prüfung folgt beim Push.
       - name: Sperrliste über die ganze Historie
         env:
-          OSS_SCRUB_SPERRLISTE_INHALT: ${{ secrets.OSS_SCRUB_SPERRLISTE_INHALT }}
+          OSS_SCRUB_SPERRLISTE_INHALT: ${{ github.event_name != 'pull_request' && secrets.OSS_SCRUB_SPERRLISTE_INHALT || '' }}
           IST_ORIGINAL: ${{ github.repository == 'ThePyth0nKid/quelle-bis-schnitt' && github.event_name != 'pull_request' }}
         run: |
           if [ -n "$OSS_SCRUB_SPERRLISTE_INHALT" ]; then
@@ -41,23 +47,25 @@ jobs:
             echo "::error::Secret OSS_SCRUB_SPERRLISTE_INHALT fehlt im Original-Repo."
             exit 1
           else
-            echo "::notice::Ohne private Sperrliste (Fork oder Pull Request von außen): nur öffentliche Regeln."
+            echo "::notice::Ohne private Sperrliste (Pull Request oder Fork): nur öffentliche Regeln."
             python3 werkzeuge/scrub/pruefen.py --historie --nur-oeffentlich
           fi
 
       - name: REUSE (Lizenzangaben je Datei)
-        run: pipx run --spec "reuse[charset-normalizer]" reuse lint
+        run: pipx run --spec "reuse[charset-normalizer]==6.2.0" reuse lint
 
   plugins:
     name: Marktplatz und Plugins
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22"
       - name: Claude Code (nur für plugin validate, ohne Anmeldung)
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code@2.1.296
       - name: claude plugin validate --strict
         run: |
           claude plugin validate --strict .
@@ -78,8 +86,10 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
       # Tests, die ffmpeg brauchen, werden ohne ffmpeg übersprungen; unter Linux läuft es mit.
       - name: ffmpeg (Linux)
         if: runner.os == 'Linux'

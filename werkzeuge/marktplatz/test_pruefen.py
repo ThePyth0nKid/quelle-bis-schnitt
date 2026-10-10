@@ -62,3 +62,56 @@ def test_frontmatter_mehrzeilig():
     fm = pruefen.frontmatter("---\nname: a\ndescription: >\n  eins\n  zwei\n---\nText")
     assert fm["name"] == "a"
     assert "eins zwei" in fm["description"]
+
+
+def test_mischwert_mit_platzhalter_wird_gemeldet(tmp_path):
+    _marktplatz(tmp_path, {"mcpServers": {"x": {"type": "http", "url": "https://example.org/mcp",
+                                                "headers": {"Authorization": "Bearer geheim123 ${x}"}}}})
+    assert any("festen Wert" in f for f in pruefen.marktplatz_pruefen(tmp_path))
+
+
+def test_schluessel_in_url_und_args_wird_gemeldet(tmp_path):
+    _marktplatz(tmp_path, {"mcpServers": {
+        "a": {"type": "http", "url": "https://example.org/mcp?apiKey=abc123"},
+        "b": {"command": "server", "args": ["--token=abc123", "--author=Erika"]},
+        "c": {"type": "http", "url": "https://example.org/mcp?apiKey=${user_config.k}&client=x"},
+    }})
+    fehler = pruefen.marktplatz_pruefen(tmp_path)
+    assert len(fehler) == 2
+    assert any("a.url" in f for f in fehler) and any("b.args" in f for f in fehler)
+
+
+def test_quelle_ausserhalb_des_repos(tmp_path):
+    _marktplatz(tmp_path / "repo")
+    datei = tmp_path / "repo" / ".claude-plugin" / "marketplace.json"
+    daten = json.loads(datei.read_text(encoding="utf-8"))
+    daten["plugins"][0]["source"] = "./../draussen"
+    datei.write_text(json.dumps(daten), encoding="utf-8")
+    (tmp_path / "draussen").mkdir()
+    assert any("aus dem Repo heraus" in f for f in pruefen.marktplatz_pruefen(tmp_path / "repo"))
+
+
+def test_quellordner_mit_anderem_namen(tmp_path):
+    _marktplatz(tmp_path)
+    (tmp_path / "plugins" / "eins").rename(tmp_path / "plugins" / "eins-ordner")
+    datei = tmp_path / ".claude-plugin" / "marketplace.json"
+    daten = json.loads(datei.read_text(encoding="utf-8"))
+    daten["plugins"][0]["source"] = "./plugins/eins-ordner"
+    datei.write_text(json.dumps(daten), encoding="utf-8")
+    assert pruefen.marktplatz_pruefen(tmp_path) == []
+
+
+def test_frontmatter_mit_bom_und_crlf():
+    fm = pruefen.frontmatter("\ufeff---\r\nname: a\r\ndescription: b\r\n---\r\nText")
+    assert fm == {"name": "a", "description": "b"}
+    assert pruefen.frontmatter("----\nname: a\n---\n") == {}
+
+
+def test_falsche_json_typen_brechen_nicht_ab(tmp_path):
+    _marktplatz(tmp_path, {"mcpServers": {"x": "kein objekt"}})
+    datei = tmp_path / ".claude-plugin" / "marketplace.json"
+    daten = json.loads(datei.read_text(encoding="utf-8"))
+    daten["plugins"].append("kein objekt")
+    datei.write_text(json.dumps(daten), encoding="utf-8")
+    fehler = pruefen.marktplatz_pruefen(tmp_path)
+    assert any("kein Objekt" in f for f in fehler)
