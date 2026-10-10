@@ -1,0 +1,21 @@
+{
+  "name": "skript",
+  "version": "0.1.0",
+  "description": "Sprechtexte für Erklärvideos von Snack bis Langvideo: sechs Slots, Hook-Regel, Sprechtext statt Schreibtext, Anti-Slop, die Methode hinter viralen Shorts. Mit Prüfskripten, deren Regeln einzeln auf aus, hinweis oder sperrt stehen, und den Agenten hook-blind und skript-kritiker. Der Mensch entscheidet je Fund.",
+  "author": {
+    "name": "ThePyth0nKid"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "repository": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "keywords": [
+    "skript",
+    "sprechtext",
+    "hook",
+    "shorts",
+    "youtube",
+    "erklaervideo",
+    "anti-slop",
+    "prompter"
+  ]
+}

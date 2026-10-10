@@ -61,6 +61,26 @@
         "suche",
         "mcp"
       ]
+    },
+    {
+      "name": "skript",
+      "description": "Sprechtexte für Erklärvideos von Snack bis Langvideo: sechs Slots, Hook-Regel, Sprechtext statt Schreibtext, Anti-Slop, die Methode hinter viralen Shorts. Mit Prüfskripten, deren Regeln einzeln auf aus, hinweis oder sperrt stehen, und den Agenten hook-blind und skript-kritiker. Der Mensch entscheidet je Fund.",
+      "source": "./plugins/skript",
+      "version": "0.1.0",
+      "author": {
+        "name": "ThePyth0nKid"
+      },
+      "license": "MIT",
+      "keywords": [
+        "skript",
+        "sprechtext",
+        "hook",
+        "shorts",
+        "youtube",
+        "erklaervideo",
+        "anti-slop",
+        "prompter"
+      ]
     }
   ]
 }
