@@ -46,7 +46,7 @@ jobs:
           fi
 
       - name: REUSE (Lizenzangaben je Datei)
-        run: pipx run reuse lint
+        run: pipx run --spec "reuse[charset-normalizer]" reuse lint
 
   plugins:
     name: Marktplatz und Plugins
