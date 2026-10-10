@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Tests für skript_pruefen.py: Fehlalarme, echte Treffer, Stufen, Formate. Nur synthetische Texte."""
+"""Tests für skript_pruefen.py: Fehlalarme, echte Treffer, Stufen, Formate, Eingabefehler. Nur synthetische Texte."""
 from __future__ import annotations
 
 import codecs
@@ -40,11 +40,17 @@ def regeln(text: str, fmt: str = "short", **kw) -> list[str]:
     ("Hallo, heute geht es um Wirbelstürme.", "anlauf-vorn", True),
     ("„Hallo“, sagt der Roboter am Bahnhof von Musterhafen.", "anlauf-vorn", True),
     ("Heute kostet ein Liter Milch in Musterhafen 2 Euro.", "anlauf-vorn", False),
+    ("Heute haben 3 Millionen Menschen in Musterhafen keinen Strom.", "anlauf-vorn", False),
+    ("Heute zeigt die Statistik von Musterhafen 40 Unfälle.", "anlauf-vorn", False),
     ("Heute zeige ich dir die Bahn von Musterhafen.", "anlauf-vorn", True),
+    ("Heute schauen wir uns die Bahn von Musterhafen an.", "anlauf-vorn", True),
+    ("Heute geht's um die Bahn von Musterhafen.", "anlauf-vorn", True),
     ("Solarstrom ist billiger denn je.", "kausal-vorn", False),
     ("Die Post sortiert 50 Millionen Briefe am Tag.", "quellvideo-vorn", False),
     ("Video-Überwachung zählt in Musterhafen 98 Fahrräder.", "quellvideo-vorn", False),
     ("Dieses Reel hat 7.899 Likes, und das Urteil darin ist falsch.", "quellvideo-vorn", True),
+    ("Dieses Instagram-Reel behauptet, die Bahn bremst nie.", "quellvideo-vorn", True),
+    ("Diese Hass-Videos erreichen in Musterhafen 2 Millionen Leute.", "quellvideo-vorn", True),
 ])
 def test_erster_satz(satz, regel, erwartet):
     assert (regel in regeln(satz + FUELLUNG)) is erwartet
@@ -62,6 +68,40 @@ def test_bannliste_und_bekannte_grenze():
     assert "bannwort" not in regeln("Das ist bahnbrechende Technik und zählt mit." + FUELLUNG)
 
 
+@pytest.mark.parametrize(("text", "erwartet"), [
+    ("Das kam 2007. Du trägst es jeden Tag.", ["Das kam 2007.", "Du trägst es jeden Tag."]),
+    ("Am 4. September kam der Ausfall.", ["Am 4. September kam der Ausfall."]),
+    ("Er landete am 3. Platz und war zufrieden.", ["Er landete am 3. Platz und war zufrieden."]),
+    ("Er wurde 3. Dann kam der Regen.", ["Er wurde 3.", "Dann kam der Regen."]),
+    ("Im 19. Jahrhundert fuhr hier eine Bahn.", ["Im 19. Jahrhundert fuhr hier eine Bahn."]),
+    ("Sie sagte: „Das stimmt.“ Dann ging sie.", ["Sie sagte: „Das stimmt.“", "Dann ging sie."]),
+    ('Er rief "Halt!" Die Bahn stand.', ['Er rief "Halt!"', "Die Bahn stand."]),
+    ("Das kostet (ungefähr!) Du zahlst es.", ["Das kostet (ungefähr!)", "Du zahlst es."]),
+    ("Das gilt z. B. für Busse. Und für Bahnen.", ["Das gilt z. B. für Busse.", "Und für Bahnen."]),
+    ("Das sind ca. 40 Tonnen, d. h. zehn Elefanten.", ["Das sind ca. 40 Tonnen, d. h. zehn Elefanten."]),
+    ("Dr. Mustermann misst 1,5 Mio. Fahrten. Das ist viel.", ["Dr. Mustermann misst 1,5 Mio. Fahrten.",
+                                                               "Das ist viel."]),
+    ("Die Bahn fährt 1.440 Mal. Du fährst einmal.", ["Die Bahn fährt 1.440 Mal.", "Du fährst einmal."]),
+    ("Sie hielt nach 1.440. Dann kam die nächste.", ["Sie hielt nach 1.440.", "Dann kam die nächste."]),
+    ("Wirklich? Ja! Genau so.", ["Wirklich?", "Ja!", "Genau so."]),
+])
+def test_satztrennung(text, erwartet):
+    assert sp.saetze(text) == erwartet
+
+
+def test_fettdruck_im_sprechtext_bleibt_text():
+    voll = "# T\n\n## Sprechtext\n\n**Diese Bahn** hält nach 20 Metern.\n### Regie\n| a | b |\nUnd du merkst es.\n"
+    text, abschnitt = sp.lies_text(voll)
+    assert abschnitt
+    assert text == "Diese Bahn hält nach 20 Metern.\nUnd du merkst es."
+
+
+def test_ohne_abschnitt_fallen_fettzeilen_weg():
+    text, abschnitt = sp.lies_text("# T\n**WER BREMST?**\nDiese Bahn hält.\n```\nCode\n```\n")
+    assert not abschnitt
+    assert text == "Diese Bahn hält."
+
+
 KOPF = "# T\n\n## Sprechtext\n\nDieser Magnet wiegt 500 Tonnen, so viel wie ein Flugzeug." + FUELLUNG + "\n\n"
 TABELLE = "| im Text | Wert | Quelle |\n|---|---|---|\n| 500 Tonnen | 500 t | Werk Musterhafen |\n"
 
@@ -76,12 +116,21 @@ def test_zahlentabelle_fehlt():
     assert "zahlentabelle" in regeln(KOPF)
 
 
-def test_bom_wird_ueber_main_entfernt(tmp_path, capsys):
+def test_bom_wird_entfernt(tmp_path, capsys):
     datei = tmp_path / "z.md"
     datei.write_bytes(codecs.BOM_UTF8 + (KOPF + "## Zahlen\n" + TABELLE).encode("utf-8"))
     assert sp.main([str(datei), "--format", "short", "--json"]) == 0
     namen = [f["regel"] for f in json.loads(capsys.readouterr().out)["funde"]]
     assert "zahlentabelle" not in namen
+
+
+def test_json_ist_ascii(tmp_path, capsys):
+    datei = tmp_path / "z.md"
+    datei.write_text("Diese Straßenbahn hält – sofort." + FUELLUNG, encoding="utf-8")
+    sp.main([str(datei), "--format", "short", "--json"])
+    ausgabe = capsys.readouterr().out
+    assert ausgabe.isascii()
+    assert any(f["regel"] == "gedankenstrich" for f in json.loads(ausgabe)["funde"])
 
 
 def test_ihr_zaehlt_nicht_als_du():
@@ -133,10 +182,8 @@ def test_trailer_genau_eine_aufforderung():
 def test_langvideo_neue_luecke_im_takt():
     block = "Die Bahn von Musterhafen fährt jeden Tag, und du siehst sie kaum. " * 40  # 480 Wörter
     luecke = "Und jetzt kommt der Teil, den keiner erwartet. "
-    ohne = block * 2
-    mit = block + luecke + block + luecke
-    assert "neue-luecke" in regeln(ohne, "lang", takt=120.0)
-    assert "neue-luecke" not in regeln(mit, "lang", takt=180.0)
+    assert "neue-luecke" in regeln(block * 2, "lang", takt=120.0)
+    assert "neue-luecke" not in regeln(block + luecke + block + luecke, "lang", takt=180.0)
 
 
 def test_stufen_und_exitcodes(tmp_path, capsys):
@@ -149,20 +196,82 @@ def test_stufen_und_exitcodes(tmp_path, capsys):
                     "--regel", "laenge=aus"]) == 0
     assert sp.main([str(datei), "--format", "short", "--regel", "gibtsnicht=sperrt"]) == 2
     assert sp.main([str(datei), "--format", "short", "--regel", "bannwort=streng"]) == 2
+    assert sp.main([str(datei), "--format", "short", "--regel", "ohne-verb=aus"]) == 2  # Schwesterregel per Aufruf
     capsys.readouterr()
 
 
-def test_regeldatei_mit_bann_und_fremden_regeln(tmp_path):
+@pytest.mark.parametrize("argumente", [
+    ["--tempo", "nan"], ["--tempo", "0"], ["--takt", "inf"], ["--fremdton", "-1"], ["--du-min", "nan"],
+])
+def test_unsinnige_zahlen_sind_eingabefehler(tmp_path, capsys, argumente):
+    datei = tmp_path / "t.md"
+    datei.write_text("Diese Bahn hält." + FUELLUNG, encoding="utf-8")
+    assert sp.main([str(datei), "--format", "short", *argumente]) == 2
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("band", ["75-60", "nan-60", "60", "a-b", "60-inf"])
+def test_band_muss_endlich_und_geordnet_sein(tmp_path, capsys, band):
+    datei = tmp_path / "t.md"
+    datei.write_text("Diese Bahn hält." + FUELLUNG, encoding="utf-8")
+    with pytest.raises(SystemExit) as aus:
+        sp.main([str(datei), "--format", "short", "--band", band])
+    assert aus.value.code == 2
+    capsys.readouterr()
+
+
+def test_datei_nicht_utf8_oder_fehlend(tmp_path, capsys):
+    datei = tmp_path / "latin.md"
+    datei.write_bytes("Die Straßenbahn hält.".encode("latin-1"))
+    assert sp.main([str(datei), "--format", "short"]) == 2
+    assert "nicht UTF-8" in capsys.readouterr().err
+    assert sp.main([str(tmp_path / "fehlt.md"), "--format", "short"]) == 2
+    capsys.readouterr()
+
+
+def test_regeldatei_mit_bann_und_schwesterregeln(tmp_path):
     toml = tmp_path / "regeln.toml"
-    toml.write_text('[regeln]\nbannwort = "sperrt"\nohne-verb = "aus"\n\n'
-                    '[bann]\nzusaetzlich = ["Mega-Deal"]\nerlaubt = ["revolutionär"]\n', encoding="utf-8")
-    stufen, daten = sp.stufen_laden(toml, [], False)
+    toml.write_bytes(codecs.BOM_UTF8 + ('[regeln]\nbannwort = "sperrt"\nohne-verb = "aus"\n\n'
+                                        '[bann]\nzusaetzlich = ["Mega-Deal"]\nerlaubt = ["revolutionär"]\n'
+                                        ).encode())
+    stufen, daten = sp.stufen_laden(sp.REGELN, toml, [])
     assert stufen["bannwort"] == "sperrt"
+    assert "ohne-verb" not in stufen  # Regel des Schwesterskripts: übersprungen
     text = "Diese revolutionär neue Technik zählt mit." + FUELLUNG
     assert "bannwort" not in [f.regel for f in sp.pruefe(text, "short", stufen, daten=daten).funde]
-    text2 = "Dieser Mega-Deal zählt mit." + FUELLUNG
-    funde = sp.pruefe(text2, "short", stufen, daten=daten).funde
+    funde = sp.pruefe("Dieser Mega-Deal zählt mit." + FUELLUNG, "short", stufen, daten=daten).funde
     assert any(f.regel == "bannwort" and f.stufe == "sperrt" for f in funde)
+
+
+@pytest.mark.parametrize("inhalt", [
+    '[regeln]\ntippfehler = "aus"\n',
+    '[regeln]\nbannwort = 1\n',
+    'regeln = "aus"\n',
+    '[bann]\nerlaubt = "spannend"\n',
+    '[bann]\nzusaetzlich = [1, 2]\n',
+    '[bann]\nverboten = ["x"]\n',
+    '[sonstiges]\na = 1\n',
+    'kein toml [\n',
+])
+def test_fehlerhafte_regeldatei_ist_eingabefehler(tmp_path, capsys, inhalt):
+    toml = tmp_path / "r.toml"
+    toml.write_text(inhalt, encoding="utf-8")
+    datei = tmp_path / "t.md"
+    datei.write_text("Diese Bahn hält." + FUELLUNG, encoding="utf-8")
+    assert sp.main([str(datei), "--format", "short", "--regeln", str(toml)]) == 2
+    capsys.readouterr()
+
+
+def test_unerwarteter_absturz_ergibt_exit_2(monkeypatch, tmp_path, capsys):
+    datei = tmp_path / "t.md"
+    datei.write_text("Diese Bahn hält." + FUELLUNG, encoding="utf-8")
+
+    def kaputt(*_a, **_k):
+        raise RuntimeError("Absicht")
+
+    monkeypatch.setattr(sp, "pruefe", kaputt)
+    assert sp.main([str(datei), "--format", "short"]) == 2
+    assert "Interner Fehler" in capsys.readouterr().err
 
 
 def test_aus_meldet_nichts():
@@ -177,6 +286,7 @@ def test_liste_und_fehlender_sprechtext(tmp_path, capsys):
     leer = tmp_path / "leer.md"
     leer.write_text("# nur Überschrift\n", encoding="utf-8")
     assert sp.main([str(leer), "--format", "short"]) == 2
+    capsys.readouterr()
 
 
 def test_jede_regel_hat_formate_und_kurztext():

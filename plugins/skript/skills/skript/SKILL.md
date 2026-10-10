@@ -144,6 +144,11 @@ zusaetzlich = ["Gamechanger"]
 erlaubt = ["spannend"]
 ```
 
+Regeln der Schwesterskripte in der Datei überspringt jedes Skript. Ein unbekannter Regelname, ein falscher Typ, ein
+unbekannter Abschnitt oder eine Datei, die nicht UTF-8 ist, bricht mit Exit-Code 2 ab, nie mit 1: Exit-Code 1 heißt
+immer „eine Regel auf `sperrt` hat angeschlagen“. Im Abschnitt `## Sprechtext` wird Fettdruck zu normalem Text;
+Abkürzungen wie „z. B.“ und Ordnungszahlen wie „am 3. Platz“ trennen keine Sätze.
+
 **Die fünf harten Punkte** (mit `--streng` sperrend, sonst Hinweis):
 
 | Punkt | Regeln |

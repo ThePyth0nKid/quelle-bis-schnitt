@@ -80,8 +80,10 @@ Ein Kanal, fünf Videos: Das beschreibt einen Stil, keine Norm.
    Regeln: `ohne-verb`, `doppelpunkt-ende`, `beats-hintereinander`, `kapitel-beginnt-mit-beat`, `beat-haeufung`,
    `ueber-budget`, `gesamtlaenge`. Jede steht auf `aus`, `hinweis` (Standard) oder `sperrt`; eine gemeinsame
    Regeldatei wie im Skill `skript` (§6) geht auch. Für einen Short `--ziel 75`, für einen Snack `--ziel 45`.
-   Die Verb-Erkennung arbeitet mit Wortstämmen, nicht mit einem Wörterbuch: Sie ist eine Warnlampe. Jede Meldung von
-   Hand lesen und entscheiden.
+   Die Verb-Erkennung arbeitet mit Wortstämmen, nicht mit einem Wörterbuch: Sie ist eine Warnlampe. Großgeschriebene
+   Wörter mitten im Satz gelten als Substantiv („Die Kosten.“ wird gemeldet), „'s“ fällt weg („Wie läuft's?“ nicht).
+   Zeilen mit `#`, `⏱` oder `▶` zählen nicht, und ein Block nur aus solchen Zeilen ist kein Kapitel; das Budget hängt
+   an der Kapitelnummer. Eine leere Datei ist ein Fehler (Exit-Code 2). Jede Meldung von Hand lesen und entscheiden.
 4. **Laut lesen** (Regel 10), dann `anti-slop-writing` fürs Vokabular.
 5. **In den Prompter nur den Sprechtext.** Regie gehört auf eine eigene Seite (Skill `prompter` im Plugin `studio`).
 

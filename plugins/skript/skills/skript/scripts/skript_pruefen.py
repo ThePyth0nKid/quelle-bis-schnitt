@@ -10,15 +10,15 @@ Aufruf:
 
 Jede Regel hat eine Stufe: ``aus`` (nicht prüfen), ``hinweis`` (melden, Standard) oder ``sperrt`` (melden und
 Exit-Code 1). Reihenfolge: Standard ``hinweis`` → ``--streng`` → ``--regeln datei.toml`` → ``--regel name=stufe``.
-Eine Regeldatei darf auch Regeln von ``hook_pruefen.py`` und ``pruefe_sprechtext.py`` tragen; was dieses Skript
-nicht kennt, überspringt es (``--liste`` zeigt, was greift). Der Mensch entscheidet je Fund: übernehmen, verwerfen
-oder anders.
+Eine Regeldatei darf auch Regeln von ``hook_pruefen.py`` und ``pruefe_sprechtext.py`` tragen; diese überspringt das
+Skript. Unbekannte Namen sind ein Fehler. Der Mensch entscheidet je Fund: übernehmen, verwerfen oder anders.
 
-Eingabe: Markdown. Gibt es ``## Sprechtext``, zählt nur dieser Abschnitt, sonst die ganze Datei ohne Zeilen, die mit
-``#``, ``|``, ``**``, ``<`` oder drei Backticks beginnen. Leerzeilen trennen Slots. Regie-Marken in eckigen Klammern
-am Zeilenanfang (``[A]``, ``[B]``) zählen nicht als Wort.
+Eingabe: Markdown in UTF-8. Gibt es ``## Sprechtext``, zählt nur dieser Abschnitt (ohne Überschriften, Tabellen,
+Codezäune und Kommentare; Fettdruck wird zu normalem Text). Sonst die ganze Datei ohne Zeilen, die mit ``#``, ``|``,
+``**``, ``<`` oder drei Backticks beginnen. Leerzeilen trennen Slots. Regie-Marken in eckigen Klammern am Zeilenanfang
+(``[A]``, ``[B]``) zählen nicht als Wort.
 
-Exit-Code: 0 ohne sperrenden Fund, 1 mit sperrendem Fund, 2 bei Aufruffehler oder ohne Sprechtext.
+Exit-Code: 0 ohne sperrenden Fund, 1 mit sperrendem Fund, 2 bei Aufruf-, Datei- oder Konfigurationsfehler.
 """
 from __future__ import annotations
 
@@ -31,14 +31,185 @@ import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Regelwerk: Stufen, Regeln, Funde (gleich aufgebaut in hook_pruefen.py und pruefe_sprechtext.py)
-# ---------------------------------------------------------------------------
-
-STUFEN = ("aus", "hinweis", "sperrt")
 FORMATE = ("snack", "short", "trailer", "lang")
 ALLE = FORMATE
 KURZ = ("snack", "short")
+
+
+# >>> gemeinsamer Kern (wortgleich in skript_pruefen.py, hook_pruefen.py und pruefe_sprechtext.py; ein Test prüft das)
+STUFEN = ("aus", "hinweis", "sperrt")
+# Alle Regelnamen der drei Prüfskripte: Eine Regeldatei darf jeden davon tragen, jeder andere Name ist ein Tippfehler.
+ALLE_REGELNAMEN = frozenset({
+    "anlauf-vorn", "quellvideo-vorn", "kausal-vorn", "ichwir-vorn", "ding-vorn", "erster-satz-lang", "frage-vorn",
+    "zahlentabelle", "zahlen-quelle", "belegblatt", "quelle-im-satz", "floskel", "du-dichte", "bannwort",
+    "gedankenstrich", "laenge", "letzter-satz", "aufforderung-trailer", "letzter-satz-also", "schlussfrage-lang",
+    "versprechen", "klammer", "wendung", "neue-luecke", "zahlenleiter", "analogie", "lacher-lage", "auszahlung-frueh",
+    "slots", "du-vor-ich",
+    "gerade-ohne-neuigkeit", "du-vorn", "bild1-text",
+    "ohne-verb", "doppelpunkt-ende", "beats-hintereinander", "kapitel-beginnt-mit-beat", "beat-haeufung",
+    "ueber-budget", "gesamtlaenge",
+})
+
+
+class Eingabefehler(Exception):
+    """Fehler in Aufruf, Datei oder Regeldatei: Meldung und Exit-Code 2."""
+
+
+ZAHLWORT = re.compile(
+    r"\b(\d[\d.,]*|null|eins|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn|elf|zwölf|hundert|tausend"
+    r"|million(en)?|milliarde(n)?|dutzend)\b",
+    re.I,
+)
+ZEIGEWORT = ("dieses", "dieser", "diese", "diesen", "diesem", "das hier", "der hier", "die hier", "den hier", "schau",
+             "guck", "stell dir", "in diesen", "in diesem", "in dieser")
+DU = re.compile(r"\b(du|dich|dir|dein|deine|deinen|deinem|deiner|deins|euch|euer|eure)\b", re.I)  # ohne „ihr“
+ICH = re.compile(r"\b(ich|mich|mir|mein|meine|meinen|meinem|meiner)\b", re.I)
+# „denn je“ und „es sei denn“ sind nicht kausal.
+KAUSAL = re.compile(r"\b(weil|obwohl|(?<!\bsei )denn(?!\s+je\b)|sodass|so dass|deshalb|deswegen|daher)\b", re.I)
+# „Instagram-Reel“ und „Hass-Videos“ zählen, „Video-Überwachung“ und „die Post“ nicht.
+QUELLVIDEO = re.compile(r"(?<!\w)(reels?|videos?|clips?|posts|likes?|aufrufe|views|follower|kommentare)\b(?!-)", re.I)
+# „Heute“ ist nur ein Anlauf, wenn ich oder wir etwas ankündigen („Heute zeige ich …“, „Heute schauen wir …“),
+# nicht bei einer Neuigkeit („Heute haben 3 Millionen Menschen …“, „Heute zeigt die Statistik …“).
+GRUSS_START = re.compile(
+    r"(hallo|hey|in diesem video|willkommen|servus|moin)\b"
+    r"|heute\s+(zeig|erklär|schau|guck|red|sprech|mach|möcht|will|woll|lern|kümmer|geh|nehm|beschäftig)\w*\s+"
+    r"(ich|wir)\b"
+    r"|heute\s+geht(\s+es|'s|s)\s+um\b",
+    re.I,
+)
+ICHWIR_START = re.compile(r"(ich|wir)\b", re.I)  # ganzes Wort, nicht „Wirbel“
+VORZEICHEN = "„“\"'»«‚‘(["  # führende Anführungszeichen und Klammern vor den Start-Prüfungen abschneiden
+FRAGE_ENDE = re.compile(r"\?[!?\s“”\"'»«)]*$")
+FRAGE_START = ("wer", "wie", "was", "warum", "wieso", "weshalb", "wann", "wo", "ist", "sind", "hat", "haben", "kann",
+               "kannst", "wusstest", "weißt", "glaubst")
+MONAT_ODER_JH = (r"(?:Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember"
+                 r"|Jahrhundert|Jahrtausend)\b")
+BANN_STANDARD = ("spannend", "unglaublich", "wusstest du", "in diesem video", "entscheidend", "revolutionär",
+                 "bahnbrechend", "faszinierend", "ganzheitlich", "gigantisch", "wahnsinn")
+# Wörter, mit denen nach einer ein- oder zweistelligen Zahl mit Punkt ein neuer Satz beginnt („Er wurde 3. Dann …“);
+# sonst ist die Zahl eine Ordnungszahl („am 3. Platz“, „am 4. September“).
+SATZANFANG = frozenset(
+    "Du Ich Wir Er Sie Es Ihr Der Die Das Den Dem Des Ein Eine Einen Einem Und Aber Doch Dann Also Jetzt Heute Danach "
+    "Deshalb Trotzdem Wenn Weil Was Wer Wie Warum Wo Dieser Diese Dieses Diesen So Nur Auch Man Mein Meine Dein Deine "
+    "Unser Unsere Hier Da Damit Dabei Seitdem Nein Ja".split()
+)
+ABKUERZUNG = re.compile(r"(?<![\w.])(?:[zZ]\.\s?B|[dD]\.\s?h|[uU]\.\s?a|[oO]\.\s?Ä|[uU]\.\s?U|[zZ]\.\s?T|ca|Dr|Prof"
+                        r"|Mio|Mrd|Nr|bzw|vgl|inkl|evtl|bspw|ggf|sog|Tsd)\.(?=\s|$)")
+GRENZE = re.compile(r"[.!?]+[“”\"'»«‚‘)\]]*(?=\s)")
+_PUNKT = "․"  # Platzhalter für den Punkt in Abkürzungen während der Satztrennung
+
+
+def _ist_satzende(vorher: str, zeichen: str, nach: str) -> bool:
+    if not nach or zeichen != ".":
+        return True
+    zahl = re.search(r"(?<![\d.,])(\d+)$", vorher)
+    if zahl is None:
+        return True
+    if len(zahl.group(1)) >= 3:  # Jahreszahl oder Betrag: „kam 2007. Du …“
+        return not re.match(MONAT_ODER_JH, nach)
+    erstes = nach.lstrip(VORZEICHEN).split(" ", 1)[0].rstrip(",;:.!?")
+    return erstes in SATZANFANG
+
+
+def saetze(text: str) -> list[str]:
+    """Sätze: Schlusszeichen nach dem Satzzeichen gehören dazu, Abkürzungen und Ordnungszahlen trennen nicht."""
+    flach = re.sub(r"\s+", " ", text).strip()
+    flach = ABKUERZUNG.sub(lambda m: m.group(0).replace(".", _PUNKT), flach)
+    ergebnis, start = [], 0
+    for m in GRENZE.finditer(flach):
+        if _ist_satzende(flach[start:m.start()], m.group(0), flach[m.end():].lstrip()):
+            ergebnis.append(flach[start:m.end()].strip())
+            start = m.end()
+    ergebnis.append(flach[start:].strip())
+    return [s.replace(_PUNKT, ".") for s in ergebnis if s]
+
+
+def text_lesen(pfad: Path) -> str:
+    """Datei als UTF-8 (mit oder ohne BOM); jeder Lesefehler wird zum Eingabefehler."""
+    try:
+        return pfad.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        raise Eingabefehler(f"{pfad}: Datei ist nicht UTF-8") from None
+    except OSError as fehler:
+        raise Eingabefehler(f"{pfad}: nicht lesbar ({fehler.strerror or fehler})") from None
+
+
+def regeldatei_lesen(pfad: Path) -> dict:
+    """Liest und prüft die TOML-Regeldatei: nur [regeln] (Name = Stufe) und [bann] (erlaubt, zusaetzlich)."""
+    try:
+        daten = tomllib.loads(text_lesen(pfad))
+    except tomllib.TOMLDecodeError as fehler:
+        raise Eingabefehler(f"{pfad}: kein gültiges TOML ({fehler})") from None
+    fremd = set(daten) - {"regeln", "bann"}
+    if fremd:
+        raise Eingabefehler(f"{pfad}: unbekannte Abschnitte {sorted(fremd)}; erlaubt sind [regeln] und [bann]")
+    regeln = daten.get("regeln", {})
+    if not isinstance(regeln, dict):
+        raise Eingabefehler(f"{pfad}: [regeln] muss eine Tabelle sein (name = \"stufe\")")
+    for name, stufe in regeln.items():
+        if name not in ALLE_REGELNAMEN:
+            raise Eingabefehler(f"{pfad}: unbekannte Regel {name!r}; --liste zeigt die Regeln je Skript")
+        if not isinstance(stufe, str) or stufe not in STUFEN:
+            raise Eingabefehler(f"{pfad}: Stufe {stufe!r} für {name} ist nicht {', '.join(STUFEN)}")
+    bann = daten.get("bann", {})
+    if not isinstance(bann, dict):
+        raise Eingabefehler(f"{pfad}: [bann] muss eine Tabelle sein")
+    fremd = set(bann) - {"erlaubt", "zusaetzlich"}
+    if fremd:
+        raise Eingabefehler(f"{pfad}: unbekannte Schlüssel in [bann]: {sorted(fremd)}")
+    for schluessel in ("erlaubt", "zusaetzlich"):
+        wert = bann.get(schluessel, [])
+        if not isinstance(wert, list) or not all(isinstance(w, str) and w.strip() for w in wert):
+            raise Eingabefehler(f"{pfad}: [bann] {schluessel} muss eine Liste von Wörtern sein")
+    return daten
+
+
+def stufen_laden(regeln: tuple, datei: Path | None, einzeln: list[str], streng: bool = False) -> tuple[dict, dict]:
+    """Stufen je Regel dieses Skripts, dazu die Regeldatei. Regeln der Schwesterskripte in der Datei überspringen."""
+    stufen = {r.name: "hinweis" for r in regeln}
+    if streng:
+        stufen.update({r.name: "sperrt" for r in regeln if getattr(r, "hart", False)})
+    daten: dict = {}
+    if datei is not None:
+        daten = regeldatei_lesen(datei)
+        stufen.update({name: stufe for name, stufe in daten.get("regeln", {}).items() if name in stufen})
+    for eintrag in einzeln:
+        name, trenner, stufe = (teil.strip() for teil in eintrag.partition("="))
+        if not trenner:
+            raise Eingabefehler(f"--regel braucht die Form name=stufe, nicht {eintrag!r}")
+        if name not in stufen:
+            raise Eingabefehler(f"--regel: dieses Skript kennt keine Regel {name!r}; --liste zeigt alle")
+        if stufe not in STUFEN:
+            raise Eingabefehler(f"--regel: Stufe {stufe!r} für {name} ist nicht {', '.join(STUFEN)}")
+        stufen[name] = stufe
+    return stufen, daten
+
+
+def bann_muster(daten: dict) -> re.Pattern[str]:
+    """Bann-Liste aus dem Standard plus ``[bann] zusaetzlich`` minus ``[bann] erlaubt`` aus der Regeldatei."""
+    bann = daten.get("bann", {})
+    erlaubt = {w.lower() for w in bann.get("erlaubt", [])}
+    woerter = [w for w in (*BANN_STANDARD, *bann.get("zusaetzlich", [])) if w.lower() not in erlaubt]
+    if not woerter:
+        return re.compile(r"(?!x)x")  # trifft nie
+    return re.compile(r"\b(" + "|".join(re.escape(w) for w in woerter) + r")\b", re.I)
+
+
+def zahl_pruefen(name: str, wert: float, *, groesser_null: bool = True) -> None:
+    """Zahlen aus dem Aufruf müssen endlich sein, je nach Größe größer oder mindestens null."""
+    if not math.isfinite(wert) or wert < 0 or (groesser_null and wert == 0):
+        raise Eingabefehler(f"{name} muss eine endliche Zahl {'> 0' if groesser_null else '≥ 0'} sein, nicht {wert}")
+
+
+def ausgabe_einrichten() -> None:
+    """Nie an Sonderzeichen abstürzen: Die Kodierung der Umgebung bleibt, nicht darstellbare Zeichen werden ersetzt.
+    Maschinenlesbar ist ``--json``; das ist reines ASCII und damit in jeder Konsole und jeder Umleitung gleich."""
+    for strom in (sys.stdout, sys.stderr):
+        try:
+            strom.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+# <<< gemeinsamer Kern
 
 
 @dataclass(frozen=True)
@@ -111,46 +282,6 @@ class Sammler:
             self.funde.append(Fund(name, self.stufen[name], stelle, text, vorschlag))
 
 
-def stufen_laden(datei: Path | None, einzeln: list[str], streng: bool) -> tuple[dict[str, str], dict]:
-    """Stufen je Regel plus Zusatzdaten aus der TOML-Datei (z. B. ``[bann]``). Wirft ValueError bei Unbekanntem."""
-    stufen = {r.name: "hinweis" for r in REGELN}
-    if streng:
-        stufen.update({r.name: "sperrt" for r in REGELN if r.hart})
-    daten: dict = {}
-    if datei is not None:
-        daten = tomllib.loads(datei.read_text(encoding="utf-8"))
-        for name, stufe in daten.get("regeln", {}).items():
-            if name in stufen:  # Regeln der anderen Prüfskripte in derselben Datei überspringen
-                _setze(stufen, name, str(stufe), str(datei))
-    for eintrag in einzeln:
-        name, trenner, stufe = eintrag.partition("=")
-        if not trenner:
-            raise ValueError(f"--regel braucht die Form name=stufe, nicht {eintrag!r}")
-        _setze(stufen, name.strip(), stufe.strip(), "--regel")
-    return stufen, daten
-
-
-def _setze(stufen: dict[str, str], name: str, stufe: str, herkunft: str) -> None:
-    if name not in stufen:
-        raise ValueError(f"{herkunft}: unbekannte Regel {name!r}; --liste zeigt alle")
-    if stufe not in STUFEN:
-        raise ValueError(f"{herkunft}: Stufe {stufe!r} für {name} ist nicht {', '.join(STUFEN)}")
-    stufen[name] = stufe
-
-
-# ---------------------------------------------------------------------------
-# Muster
-# ---------------------------------------------------------------------------
-
-ZAHLWORT = re.compile(
-    r"\b(\d[\d.,]*|null|eins|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn|elf|zwölf|hundert|tausend"
-    r"|million(en)?|milliarde(n)?|dutzend)\b",
-    re.I,
-)
-ZEIGEWORT = ("dieses", "dieser", "diese", "diesen", "diesem", "das hier", "der hier", "die hier", "schau", "guck",
-             "stell dir", "in diesen", "in diesem", "in dieser")
-DU = re.compile(r"\b(du|dich|dir|dein|deine|deinen|deinem|deiner|deins|euch|euer|eure)\b", re.I)  # ohne „ihr“
-ICH = re.compile(r"\b(ich|mich|mir|mein|meine|meinen|meinem|meiner)\b", re.I)
 FLOSKEL = re.compile(r"(los geht'?s|schauen wir (uns )?(mal|das)|gucken wir (mal|uns)|wir gehen mal rein"
                      r"|in diesem video|heute zeige ich|willkommen zurück|hallo zusammen|schön, dass du)", re.I)
 WENDUNG = re.compile(r"^(aber|nein|nope|doch|trotzdem|jetzt denkst du|falsch|und trotzdem|dabei)\b"
@@ -161,25 +292,9 @@ FORESHADOW = re.compile(r"\b(gleich|am ende|dann siehst du|du bekommst|du siehst
                         r"|umrechnen|nachgerechnet|zeige dir|zeig dir|und (am ende|dann) )", re.I)
 QUELLE = re.compile(r"(gemessen|gezählt|berechnet|veröffentlicht|fact sheet|studie|forscher|gefunden"
                     r"|hat .*?\d{4}|laut )", re.I)
-# „denn je“ und „es sei denn“ sind nicht kausal; „Post“ ist auch die Post; „Video-Überwachung“ ist kein Quellvideo.
-KAUSAL = re.compile(r"\b(weil|obwohl|(?<!\bsei )denn(?!\s+je\b)|sodass|so dass|deshalb|deswegen|daher)\b", re.I)
-QUELLVIDEO = re.compile(r"(?<![-\w])(reels?|videos?|clips?|posts|likes?|aufrufe|views|follower|kommentare)"
-                        r"\b(?!-)", re.I)
-# „Heute“ ist nur vor einem Anlauf-Verb ein Anlauf („Heute zeige ich …“), nicht bei einer Neuigkeit („Heute kostet …“).
-GRUSS_START = re.compile(r"(hallo|hey|in diesem video|willkommen|servus|moin)\b"
-                         r"|heute (zeig|erklär|schau|guck|geht|red|sprech|mach|hab|möcht|will|woll|lern|kümmer)", re.I)
-ICHWIR_START = re.compile(r"(ich|wir)\b", re.I)  # ganzes Wort, nicht „Wirbel“
-VORZEICHEN = "„“\"'»«‚‘(["  # führende Anführungszeichen und Klammern vor den Start-Prüfungen abschneiden
-FRAGE_ENDE = re.compile(r"\?[!?\s“”\"'»«)]*$")
-FRAGE_START = ("wer", "wie", "was", "warum", "wieso", "weshalb", "wann", "wo", "ist", "sind", "hat", "haben", "kann",
-               "kannst", "wusstest", "weißt", "glaubst")
-MONAT_ODER_JH = (r"(?:Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember"
-                 r"|Jahrhundert|Jahrtausend)\b")
 CTA = re.compile(r"(\bfolg(e)? (mir|rein|jetzt)\b|\babonnier|\bkommentier|in die kommentare|welche zahl soll"
                  r"|was denkst du\b|was meinst du\b|\bteil (das|es)\b|\blike\b|link in der bio)", re.I)
 FAZIT = re.compile(r"^(zusammengefasst|fazit|das heißt also|kurz gesagt|danke)\b", re.I)
-BANN_STANDARD = ("spannend", "unglaublich", "wusstest du", "in diesem video", "entscheidend", "revolutionär",
-                 "bahnbrechend", "faszinierend", "ganzheitlich", "gigantisch", "wahnsinn")
 ANALOGIE = re.compile(
     r"(?:\bgenau|\bdoppelt |\bhalb |\b)so \w+ wie\b"
     r"|\b(schwerer|größer|heißer|kälter|schneller|länger|kleiner|stärker|höher|älter|lauter|heller|dicker|dünner"
@@ -191,6 +306,7 @@ ANALOGIE = re.compile(
 WIE_ANALOGIE = re.compile(r"\bwie (ein|eine|einen|einem|zwei|drei|vier|fünf|zehn|hundert|tausend|\d[\d.,]*)\b"
                           r"(?! (Studie|Umfrage|Bericht|Analyse))")
 REGIE_MARKE = re.compile(r"^\s*\[[A-ZÄÖÜ0-9]{1,12}\]\s*")
+FETT = re.compile(r"(\*\*|__)(.+?)\1")
 
 # Formatvorgaben (einstellbar): Sekunden gesprochen bei --tempo Wörtern je Sekunde
 LAENGE = {"snack": (30.0, 45.0), "short": (60.0, 75.0), "trailer": (35.0, 60.0), "lang": (300.0, 840.0)}
@@ -201,29 +317,33 @@ TRAILER_BEATS = [("Haken", 0.08), ("Beweis", 0.22), ("Was du bekommst", 0.20), (
                  ("Für wen", 0.12), ("Aufforderung", 0.18)]
 
 
-def bann_muster(daten: dict) -> re.Pattern[str]:
-    """Bann-Liste aus dem Standard plus ``[bann] zusaetzlich`` minus ``[bann] erlaubt`` aus der Regeldatei."""
-    bann = daten.get("bann", {})
-    erlaubt = {w.lower() for w in bann.get("erlaubt", [])}
-    woerter = [w for w in (*BANN_STANDARD, *bann.get("zusaetzlich", [])) if w.lower() not in erlaubt]
-    if not woerter:
-        return re.compile(r"(?!x)x")  # trifft nie
-    return re.compile(r"\b(" + "|".join(re.escape(w) for w in woerter) + r")\b", re.I)
-
-
 # ---------------------------------------------------------------------------
 # Text lesen und zerlegen
 # ---------------------------------------------------------------------------
 
+def _sprechzeilen(zeilen: list[str], ganze_datei: bool) -> list[str]:
+    """Im Abschnitt „## Sprechtext“ fallen nur Überschriften, Tabellen, Codezäune und Kommentare weg; Fettdruck wird
+    zu normalem Text. In der ganzen Datei fallen auch Zeilen weg, die mit ``**`` oder ``<`` beginnen."""
+    raus, im_zaun = [], False
+    for zeile in zeilen:
+        kopf = zeile.lstrip()
+        if kopf.startswith("```"):
+            im_zaun = not im_zaun
+            continue
+        if im_zaun or kopf.startswith(("#", "|", "<!--")):
+            continue
+        if ganze_datei and kopf.startswith(("**", "<")):
+            continue
+        raus.append(REGIE_MARKE.sub("", FETT.sub(r"\2", zeile)))
+    return raus
+
+
 def lies_text(voll: str) -> tuple[str, bool]:
     """Sprechtext aus dem Markdown; zweiter Wert: gab es den Abschnitt „## Sprechtext“?"""
-    text = voll
     m = re.search(r"^## Sprechtext.*?$\n(.*?)(?=^## |\Z)", voll, re.S | re.M)
     if m:
-        text = m.group(1)
-    zeilen = [z for z in text.splitlines() if not z.lstrip().startswith(("#", "|", "**", "<", "```"))]
-    zeilen = [REGIE_MARKE.sub("", z) for z in zeilen]
-    return "\n".join(zeilen).strip(), bool(m)
+        return "\n".join(_sprechzeilen(m.group(1).splitlines(), False)).strip(), True
+    return "\n".join(_sprechzeilen(voll.splitlines(), True)).strip(), False
 
 
 def zahlentabelle(voll: str) -> list[list[str]] | None:
@@ -236,12 +356,6 @@ def zahlentabelle(voll: str) -> list[list[str]] | None:
     if len(zeilen) < 2:  # Kopfzeile plus mindestens eine Zahl
         return None
     return [[c.strip() for c in z.strip("|").split("|")] for z in zeilen[1:]]
-
-
-def saetze(text: str) -> list[str]:
-    """Sätze; „am 4. September“ und „im 19. Jahrhundert“ bleiben einer, „kam 2007. Du …“ sind zwei."""
-    muster = rf"(?<![0-9]\.)(?<=[.!?])\s+|(?<=[0-9]\.)\s+(?!{MONAT_ODER_JH})"
-    return [s.strip() for s in re.split(muster, text.replace("\n", " ").strip()) if s.strip()]
 
 
 def lagen(s: list[str]) -> list[float]:
@@ -326,7 +440,7 @@ def pruefe_belege(sa: Sammler, text: str, voll: str, hat_abschnitt: bool, pfad: 
                  "nennen, wenn es natürlich klingt („Das hat das Wetteramt gemessen“)")
 
 
-def pruefe_sprache(sa: Sammler, text: str, fmt: str, bann: re.Pattern[str], du_min: float) -> None:
+def pruefe_sprache(sa: Sammler, text: str, bann: re.Pattern[str], du_min: float) -> None:
     n = len(text.split())
     f = FLOSKEL.search(text)
     if f:
@@ -342,7 +456,7 @@ def pruefe_sprache(sa: Sammler, text: str, fmt: str, bann: re.Pattern[str], du_m
         sa.melde("gedankenstrich", "gesamt", "Gedankenstrich im Sprechtext", "Punkt oder Komma, gesprochen eine Pause")
 
 
-def pruefe_ende(sa: Sammler, text: str, s: list[str], fmt: str) -> None:
+def pruefe_ende(sa: Sammler, s: list[str], fmt: str) -> None:
     letzter = s[-1]
     if fmt == "trailer":
         lage = lagen(s)
@@ -402,15 +516,15 @@ def pruefe_bau(sa: Sammler, text: str, s: list[str], fmt: str, dauer: float, tak
     if not ANALOGIE.search(flach) and not WIE_ANALOGIE.search(flach):
         sa.melde("analogie", "gesamt", "keine Alltags-Analogie erkannt („so groß wie …“, „schwerer als ein …“)",
                  "ein oder zwei Analogien tragen das Verstehen")
-    for name, satz, grenze, zu_frueh in (("lacher-lage", lacher, 75.0, "Lacher"),
-                                         ("auszahlung-frueh", auszahlung, 25.0, "Auszahlung")):
+    for name, satz, grenze, was in (("lacher-lage", lacher, 75.0, "Lacher"),
+                                    ("auszahlung-frueh", auszahlung, 25.0, "Auszahlung")):
         if not satz:
             continue
         stelle = lage_von(text, satz)
         if stelle is None:
-            sa.melde(name, "gesamt", f"der {zu_frueh}-Satz steht nicht wörtlich im Text", "Satz exakt übergeben")
+            sa.melde(name, "gesamt", f"der {was}-Satz steht nicht wörtlich im Text", "Satz exakt übergeben")
         elif stelle < grenze:
-            sa.melde(name, f"{stelle:.0f} %", f"{zu_frueh} schon bei {stelle:.0f} % (Vorgabe ab {grenze:.0f} %)",
+            sa.melde(name, f"{stelle:.0f} %", f"{was} schon bei {stelle:.0f} % (Vorgabe ab {grenze:.0f} %)",
                      "später setzen oder danach noch steigern")
     tabelle = SCHEMA_SLOTS if fmt in KURZ else TRAILER_BEATS if fmt == "trailer" else []
     if tabelle:
@@ -454,11 +568,11 @@ def pruefe(voll: str, fmt: str, stufen: dict[str, str], *, daten: dict | None = 
     sa = Sammler(stufen, fmt)
     pruefe_erster_satz(sa, s)
     pruefe_belege(sa, text, voll, hat_abschnitt, pfad)
-    pruefe_sprache(sa, text, fmt, bann_muster(daten or {}), DU_MIN[fmt] if du_min is None else du_min)
+    pruefe_sprache(sa, text, bann_muster(daten or {}), DU_MIN[fmt] if du_min is None else du_min)
     if not lo <= dauer <= hi:
         sa.melde("laenge", "gesamt", f"Länge {dauer:.0f} s außerhalb des Bands {lo:g}–{hi:g} s",
                  "kürzen oder ausbauen; das Band ist mit --band einstellbar")
-    pruefe_ende(sa, text, s, fmt)
+    pruefe_ende(sa, s, fmt)
     pruefe_bau(sa, text, s, fmt, dauer, takt, lacher, auszahlung)
     return Ergebnis(n, len(s), dauer, (lo, hi), sa.funde)
 
@@ -486,16 +600,16 @@ def regeln_zeigen(stufen: dict[str, str]) -> None:
 
 def _band(wert: str) -> tuple[float, float]:
     lo, trenner, hi = wert.partition("-")
-    if not trenner:
-        raise argparse.ArgumentTypeError("Band als VON-BIS in Sekunden, z. B. 60-75")
-    return float(lo), float(hi)
+    try:
+        band = (float(lo), float(hi)) if trenner else None
+    except ValueError:
+        band = None
+    if band is None or not all(math.isfinite(x) and x >= 0 for x in band) or band[0] > band[1]:
+        raise argparse.ArgumentTypeError("Band als VON-BIS in Sekunden, endlich, VON ≤ BIS, z. B. 60-75")
+    return band
 
 
-def main(argv: list[str] | None = None) -> int:
-    try:  # Sonderzeichen sollen in einer umgeleiteten cp1252-Konsole nicht abstürzen
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, ValueError):
-        pass
+def _main(argv: list[str] | None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("datei", nargs="?", type=Path)
     ap.add_argument("--format", choices=FORMATE)
@@ -503,7 +617,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--regeln", type=Path, metavar="TOML", help="Datei mit [regeln] name = \"stufe\" und [bann]")
     ap.add_argument("--streng", action="store_true", help="die fünf harten Punkte auf „sperrt“")
     ap.add_argument("--liste", action="store_true", help="alle Regeln mit Stufe zeigen und enden")
-    ap.add_argument("--json", action="store_true", help="Ergebnis als JSON")
+    ap.add_argument("--json", action="store_true", help="Ergebnis als JSON (nur ASCII)")
     ap.add_argument("--tempo", type=float, default=2.6, help="Wörter je Sekunde (Faustwert 2,6; eigenes messen)")
     ap.add_argument("--fremdton", "--freeze", type=float, default=0.0, dest="fremdton",
                     help="Sekunden fremder O-Ton, die zur Länge zählen")
@@ -513,40 +627,46 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lacher", help="der Lacher-Satz wörtlich (optional)")
     ap.add_argument("--auszahlung", help="der Auszahlungs-Satz wörtlich (optional)")
     a = ap.parse_args(argv)
-    try:
-        stufen, daten = stufen_laden(a.regeln, a.regel, a.streng)
-    except (ValueError, OSError, tomllib.TOMLDecodeError) as fehler:
-        print(f"Fehler: {fehler}", file=sys.stderr)
-        return 2
+    stufen, daten = stufen_laden(REGELN, a.regeln, a.regel, a.streng)
     if a.liste:
         regeln_zeigen(stufen)
         return 0
     if a.datei is None or a.format is None:
-        ap.error("Datei und --format sind nötig (oder --liste)")
-    if not math.isfinite(a.fremdton) or a.fremdton < 0 or a.tempo <= 0 or a.takt <= 0:
-        print("Fehler: --fremdton ≥ 0, --tempo und --takt > 0", file=sys.stderr)
-        return 2
-    if not a.datei.is_file():
-        print(f"Fehler: Datei fehlt: {a.datei}", file=sys.stderr)
-        return 2
-    voll = a.datei.read_text(encoding="utf-8-sig")  # ohne BOM, sonst fehlt „## Sprechtext“
-    erg = pruefe(voll, a.format, stufen, daten=daten, pfad=a.datei, tempo=a.tempo, fremdton=a.fremdton,
-                 band=a.band, du_min=a.du_min, takt=a.takt, lacher=a.lacher, auszahlung=a.auszahlung)
+        raise Eingabefehler("Datei und --format sind nötig (oder --liste)")
+    zahl_pruefen("--tempo", a.tempo)
+    zahl_pruefen("--takt", a.takt)
+    zahl_pruefen("--fremdton", a.fremdton, groesser_null=False)
+    if a.du_min is not None:
+        zahl_pruefen("--du-min", a.du_min, groesser_null=False)
+    erg = pruefe(text_lesen(a.datei), a.format, stufen, daten=daten, pfad=a.datei, tempo=a.tempo,
+                 fremdton=a.fremdton, band=a.band, du_min=a.du_min, takt=a.takt, lacher=a.lacher,
+                 auszahlung=a.auszahlung)
     if erg is None:
-        print("Fehler: kein Sprechtext gefunden.", file=sys.stderr)
-        return 2
+        raise Eingabefehler(f"{a.datei}: kein Sprechtext gefunden")
     sperrend = any(f.stufe == "sperrt" for f in erg.funde)
     if a.json:
         print(json.dumps({"datei": str(a.datei), "format": a.format, "woerter": erg.woerter, "saetze": erg.saetze,
                           "sekunden": round(erg.sekunden, 1), "band": list(erg.band),
                           "funde": [asdict(f) | {"hart": REGEL[f.regel].hart} for f in erg.funde],
-                          "sperrend": sperrend}, ensure_ascii=False, indent=2))
+                          "sperrend": sperrend}, ensure_ascii=True, indent=2))
     else:
         mit = f" + {a.fremdton:g} s Fremdton" if a.fremdton else ""
         lo, hi = erg.band
         ausgeben(erg.funde, f"\n{erg.woerter} Wörter, {erg.saetze} Sätze, {erg.sekunden:.0f} s bei {a.tempo:g} W/s"
                             f"{mit} (Band {lo:g}–{hi:g} s), Format {a.format}\n")
     return 1 if sperrend else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ausgabe_einrichten()
+    try:
+        return _main(argv)
+    except Eingabefehler as fehler:
+        print(f"Fehler: {fehler}", file=sys.stderr)
+        return 2
+    except Exception as fehler:  # nie Exit 1 (= „sperrend“) für einen Absturz
+        print(f"Interner Fehler ({type(fehler).__name__}): {fehler}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
