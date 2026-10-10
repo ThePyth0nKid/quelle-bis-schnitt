@@ -101,6 +101,25 @@
         "zwei-kamera",
         "schnitt"
       ]
+    },
+    {
+      "name": "arbeitsweise",
+      "description": "Arbeitsregeln für Claude Code: erst selbst prüfen, dann ein unabhängiger Review-Agent, Planmodus für Komplexes, Secrets nie im Code, Ablage nach Prinzip. Dazu ein Deploy-Wächter: Lock je Projekt und Obermenge-Prüfung vor jedem Deploy.",
+      "source": "./plugins/arbeitsweise",
+      "version": "0.1.0",
+      "author": {
+        "name": "ThePyth0nKid"
+      },
+      "license": "MIT",
+      "keywords": [
+        "review",
+        "arbeitsweise",
+        "planmodus",
+        "secrets",
+        "deploy",
+        "lock",
+        "git"
+      ]
     }
   ]
 }

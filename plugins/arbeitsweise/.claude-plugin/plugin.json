@@ -1,0 +1,20 @@
+{
+  "name": "arbeitsweise",
+  "version": "0.1.0",
+  "description": "Arbeitsregeln für Claude Code: erst selbst prüfen, dann ein unabhängiger Review-Agent, Planmodus für Komplexes, Secrets nie im Code, Ablage nach Prinzip. Dazu ein Deploy-Wächter: Lock je Projekt und Obermenge-Prüfung vor jedem Deploy.",
+  "author": {
+    "name": "ThePyth0nKid"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "repository": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
+  "keywords": [
+    "review",
+    "arbeitsweise",
+    "planmodus",
+    "secrets",
+    "deploy",
+    "lock",
+    "git"
+  ]
+}

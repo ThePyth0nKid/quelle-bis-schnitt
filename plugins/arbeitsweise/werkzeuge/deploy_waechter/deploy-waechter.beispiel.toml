@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: MIT
+# Beispiel für .deploy-waechter.toml. Kopiere die Datei als ".deploy-waechter.toml" in die Wurzel deines
+# Git-Repos (gilt dann für dieses Repo) oder in den Benutzer-Konfigordner
+# (Windows: %APPDATA%\deploy-waechter\deploy-waechter.toml, sonst ~/.config/deploy-waechter/deploy-waechter.toml).
+# Alle Angaben sind optional. Relative Pfade gelten relativ zu dieser Datei.
+
+# Name des Projekts für Lock und Log. Ohne Angabe: Name der Git-Wurzel.
+# Verschiedene Projekte sperren sich nie gegenseitig; innerhalb eines Projekts sperrt jeder Bereich jeden anderen.
+projekt = "mein-projekt"
+
+[lock]
+# Ordner für die Lock-Dateien. Alle Stränge, die sich absprechen sollen, brauchen DENSELBEN Ordner.
+# Ohne Angabe: Benutzer-Zustandsordner (Windows %LOCALAPPDATA%\deploy-waechter\locks, sonst ~/.local/state/…).
+# In einer Repo-Konfiguration (.deploy-waechter.toml in der Git-Wurzel) nur relative Pfade UNTERHALB des
+# Zustandsordners, z. B. "locks-team". Absolute Pfade, ~ und $VAR nur in der Benutzer-Konfiguration oder per --konfig.
+# ordner = "locks"
+# Ab wann ein Lock als verwaist gilt und übernommen wird (Voreinstellung 90, nicht gemessen; 0 = nie).
+verwaist_nach_minuten = 90
+
+[log]
+# Append-only: jede Zeile "- Zeit · [Projekt] Ereignis". Nie von Hand umschreiben.
+# Gleiche Pfad-Regel wie bei lock.ordner. Ohne Angabe: <Zustandsordner>/deploy-log.md
+# datei = "deploy-log.md"
+
+[obermenge]
+# Was gilt als ausgeliefert? Git-Referenzmuster wie bei "git for-each-ref", z. B. Tags, die du nach
+# jedem Deploy setzt ("git tag ausgeliefert/2026-10-10-backend <commit>").
+ausgeliefert_refs = ["refs/tags/ausgeliefert/*"]
+# Zusätzlich die Commits aus "release --ausgeliefert <commit>" im Log der letzten "tage" Tage.
+log_als_quelle = true
+tage = 10
+
+# Deploy-Arten: welche Pfade liefert ein Ziel aus? Ein fehlender Commit zählt mit --art nur dann hart,
+# wenn er in diesen Pfaden etwas mitbringt. Ohne --art zählt jeder fehlende Commit.
+[obermenge.arten.backend]
+pfade = ["backend", "gemeinsam"]
+
+[obermenge.arten.app]
+pfade = ["app", "gemeinsam"]
