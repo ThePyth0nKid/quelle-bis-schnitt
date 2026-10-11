@@ -36,7 +36,7 @@ import time
 import tomllib
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 KONFIG_NAME = ".deploy-waechter.toml"
 # Voreinstellung, nicht gemessen: so lange darf ein Deploy dauern, bevor sein Lock als verwaist gilt.
@@ -94,7 +94,11 @@ def _pfad(wert: object, basis: Path, schluessel: str, aus_repo: bool) -> Path:
     if aus_repo:
         # Eine Konfiguration aus einem (womöglich fremden) Repo darf nur unterhalb des Zustandsordners schreiben.
         roh = Path(wert)
-        if wert.startswith("~") or "$" in wert or "%" in wert or roh.is_absolute() or roh.drive or roh.root:
+        # Laufwerk (C:/…) und Backslash-Pfade auf jedem System ablehnen: unter Linux gälte „C:/locks“ sonst als
+        # relativer Ordner namens „C:“, und dieselbe Repo-Konfiguration verhielte sich je nach Rechner anders.
+        windows = PureWindowsPath(wert)
+        if (wert.startswith("~") or "$" in wert or "%" in wert or roh.is_absolute() or roh.drive or roh.root
+                or windows.drive or windows.root):
             raise WaechterFehler(f"{schluessel}: in einer Repo-Konfiguration nur relative Pfade unterhalb des "
                                  "Zustandsordners (kein ~, $, %, kein absoluter Pfad). Andere Orte gehören in die "
                                  "Benutzer-Konfiguration oder nach --konfig.")
