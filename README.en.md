@@ -20,7 +20,7 @@ The skills, tools and docs are written in German. Claude reads and applies them 
 | `skript` | spoken scripts for long and short videos | skills `skript`, `skript-lang`, `skript-short`, `skript-snack`, `skript-trailer`, `hook`, `sprechtext`, `anti-slop-writing`, `viral-methode`; agents `hook-blind`, `skript-kritiker`; check scripts |
 | `studio` | two-camera shoot, teleprompter, audio, edit in DaVinci Resolve, delivery | skills `dreh-setup`, `zwei-kamera`, `prompter`, `ton-mastering`, `resolve-schnitt`, `abgabe`; command `/studio:einrichten`; tool `studio` |
 | `arbeitsweise` | rules for working with agents | skills `arbeitsweise`, `deploy-lock`; tool `deploy_waechter` |
-| `akte` | evidence board with mandatory sources, as an MCP | **coming** from the `die-akte` repo |
+| `akte` | evidence board with mandatory sources, as an MCP | skill `akte-fuehren`; MCP `akte-mcp` from the [Ultra-Akte](https://github.com/ThePyth0nKid/ultra-akte) (needs a local Ultra-Akte 0.3.0 or later and `uv`) |
 
 ## Install
 

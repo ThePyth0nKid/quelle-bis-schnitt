@@ -4,8 +4,10 @@
       "type": "stdio",
       "command": "uvx",
       "args": [
+        "--python",
+        "3.12",
         "--from",
-        "git+https://github.com/ThePyth0nKid/die-akte@v0.1.0#subdirectory=mcp",
+        "https://github.com/ThePyth0nKid/ultra-akte/archive/refs/tags/v0.3.0.zip#subdirectory=mcp",
         "akte-mcp"
       ],
       "env": {

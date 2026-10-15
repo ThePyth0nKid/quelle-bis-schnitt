@@ -64,9 +64,9 @@
     },
     {
       "name": "akte",
-      "description": "Die Akte als MCP: Ermittler-Board mit Belegpflicht, Beweissicherung und signierten Freigaben. Agenten legen Karten, Fäden mit wörtlichen Belegen und Kamerafahrten als Entwurf an; freigeben tut ein Mensch. Braucht eine eigene Akte (lokal, Repo die-akte) und uv.",
+      "description": "Die Ultra-Akte als MCP: Ermittler-Board mit Belegpflicht, Beweissicherung und signierten Freigaben. Agenten legen Karten, Fäden mit wörtlichen Belegen und Kamerafahrten als Entwurf an; freigeben tut ein Mensch. Braucht eine eigene Ultra-Akte ab 0.3.0 (lokal, Repo ultra-akte) und uv.",
       "source": "./plugins/akte",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "author": {
         "name": "ThePyth0nKid"
       },
