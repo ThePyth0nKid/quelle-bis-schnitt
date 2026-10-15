@@ -1,12 +1,12 @@
 {
   "name": "akte",
-  "version": "0.1.0",
-  "description": "Die Akte als MCP: Ermittler-Board mit Belegpflicht, Beweissicherung und signierten Freigaben. Agenten legen Karten, Fäden mit wörtlichen Belegen und Kamerafahrten als Entwurf an; freigeben tut ein Mensch. Braucht eine eigene Akte (lokal, Repo die-akte) und uv.",
+  "version": "0.3.0",
+  "description": "Die Ultra-Akte als MCP: Ermittler-Board mit Belegpflicht, Beweissicherung und signierten Freigaben. Agenten legen Karten, Fäden mit wörtlichen Belegen und Kamerafahrten als Entwurf an; freigeben tut ein Mensch. Braucht eine eigene Ultra-Akte ab 0.3.0 (lokal, Repo ultra-akte) und uv.",
   "author": {
     "name": "ThePyth0nKid"
   },
   "license": "MIT",
-  "homepage": "https://github.com/ThePyth0nKid/die-akte",
+  "homepage": "https://github.com/ThePyth0nKid/ultra-akte",
   "repository": "https://github.com/ThePyth0nKid/quelle-bis-schnitt",
   "keywords": [
     "akte",

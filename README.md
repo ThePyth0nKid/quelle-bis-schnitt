@@ -18,7 +18,7 @@ Leitsatz: **Agenten recherchieren, Regeln beraten, der Mensch entscheidet und gi
 | `skript` | Sprechtexte für Lang- und Kurzvideos | Skills `skript`, `skript-lang`, `skript-short`, `skript-snack`, `skript-trailer`, `hook`, `sprechtext`, `anti-slop-writing`, `viral-methode`; Agenten `hook-blind`, `skript-kritiker`; Prüfskripte |
 | `studio` | Dreh mit zwei Kameras, Prompter, Ton, Schnitt in DaVinci Resolve, Abgabe | Skills `dreh-setup`, `zwei-kamera`, `prompter`, `ton-mastering`, `resolve-schnitt`, `abgabe`; Befehl `/studio:einrichten`; Werkzeug `studio` |
 | `arbeitsweise` | Regeln für die Arbeit mit Agenten | Skills `arbeitsweise`, `deploy-lock`; Werkzeug `deploy_waechter` |
-| `akte` | Ermittler-Board mit Belegpflicht als MCP | Skill `akte-fuehren`; MCP `akte-mcp` aus [die-akte](https://github.com/ThePyth0nKid/die-akte) (braucht eine lokale Akte und `uv`) |
+| `akte` | Ermittler-Board mit Belegpflicht als MCP | Skill `akte-fuehren`; MCP `akte-mcp` aus der [Ultra-Akte](https://github.com/ThePyth0nKid/ultra-akte) ab 0.3.0 (braucht eine lokale Ultra-Akte und `uv`) |
 
 ## Installieren
 
